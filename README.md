@@ -1,4 +1,4 @@
-# rabbitmq-common
+rabbitmq-common
 
 A lightweight and type-safe RabbitMQ wrapper built on top of `amqplib` for Node.js and TypeScript applications.
 
