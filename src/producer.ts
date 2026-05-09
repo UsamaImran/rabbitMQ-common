@@ -4,9 +4,14 @@ export class Producer extends BaseRabbit {
   async publish<T>(
     queue: string,
     message: T,
-    options: { durable?: boolean; persistent?: boolean } = {},
+    options: {
+      durable?: boolean;
+      persistent?: boolean;
+    } = {},
   ) {
-    if (!this.channel) await this.init();
+    if (!this.channel) {
+      await this.init();
+    }
 
     await this.channel!.assertQueue(queue, {
       durable: options.durable ?? true,
@@ -15,7 +20,9 @@ export class Producer extends BaseRabbit {
     return this.channel!.sendToQueue(
       queue,
       Buffer.from(JSON.stringify(message)),
-      { persistent: options.persistent ?? true },
+      {
+        persistent: options.persistent ?? true,
+      },
     );
   }
 }

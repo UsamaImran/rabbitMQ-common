@@ -1,4 +1,4 @@
-rabbitmq-common
+# rabbitmq-common
 
 A lightweight and type-safe RabbitMQ wrapper built on top of `amqplib` for Node.js and TypeScript applications.
 
@@ -7,8 +7,8 @@ A lightweight and type-safe RabbitMQ wrapper built on top of `amqplib` for Node.
 - Simple producer/consumer abstraction
 - Shared RabbitMQ connection handling
 - Type-safe messages using generics
-- Durable queues by default
-- Persistent messages by default
+- Durable queues enabled by default
+- Persistent messages enabled by default
 - Async consumer support
 - Graceful shutdown support
 - Prefetch support
@@ -45,6 +45,22 @@ await producer.publish("emails", {
 });
 ```
 
+### With Options
+
+```ts
+await producer.publish(
+  "emails",
+  {
+    to: "john@example.com",
+    subject: "Welcome!",
+  },
+  {
+    durable: true,
+    persistent: true,
+  },
+);
+```
+
 ---
 
 ## Consumer
@@ -72,6 +88,14 @@ const consumer = new EmailConsumer("amqp://guest:guest@localhost:5672");
 await consumer.consume("emails");
 ```
 
+### With Prefetch
+
+```ts
+await consumer.consume("emails", {
+  prefetch: 1,
+});
+```
+
 ---
 
 # API
@@ -93,10 +117,10 @@ publish<T>(
 
 ### Options
 
-| Option     | Default | Description                           |
-| ---------- | ------- | ------------------------------------- |
-| durable    | true    | Makes queue survive RabbitMQ restarts |
-| persistent | true    | Persists messages to disk             |
+| Option     | Default | Description                      |
+| ---------- | ------- | -------------------------------- |
+| durable    | `true`  | Queue survives RabbitMQ restarts |
+| persistent | `true`  | Messages are persisted to disk   |
 
 ---
 
@@ -116,10 +140,10 @@ consume(
 
 ### Options
 
-| Option   | Default   | Description                    |
-| -------- | --------- | ------------------------------ |
-| durable  | true      | Makes queue durable            |
-| prefetch | undefined | Limits unacknowledged messages |
+| Option   | Default     | Description                      |
+| -------- | ----------- | -------------------------------- |
+| durable  | `true`      | Queue survives RabbitMQ restarts |
+| prefetch | `undefined` | Limits unacknowledged messages   |
 
 ---
 
@@ -145,7 +169,7 @@ process.on("SIGTERM", async () => {
 - Always acknowledge messages
 - Keep consumers idempotent
 - Use durable queues in production
-- Use dead-letter queues for retries
+- Use persistent messages in production
 - Gracefully close RabbitMQ connections on shutdown
 
 ---
