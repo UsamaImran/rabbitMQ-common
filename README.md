@@ -1,4 +1,4 @@
-# @usama-imran/rabbitmq-common
+rabbitmq-common
 
 A lightweight, type-safe wrapper for RabbitMQ (amqplib) designed for microservices. Built with TypeScript and ESM support.
 
