@@ -10,32 +10,29 @@ export abstract class Consumer<T> extends BaseRabbit {
       durable?: boolean;
       prefetch?: number;
     } = {},
-  ) {
-    if (!this.channel) {
-      await this.init();
+  ): Promise<void> {
+    const channel = await this.getChannel();
+
+    const prefetch = options.prefetch ?? 1;
+
+    if (prefetch > 0) {
+      await channel.prefetch(prefetch);
     }
 
-    if (options.prefetch) {
-      await this.channel!.prefetch(options.prefetch);
-    }
-
-    await this.channel!.assertQueue(queue, {
+    await channel.assertQueue(queue, {
       durable: options.durable ?? true,
     });
 
-    this.channel!.consume(queue, async (msg) => {
+    await channel.consume(queue, async (msg) => {
       if (!msg) return;
 
       try {
         const content: T = JSON.parse(msg.content.toString());
-
         await this.onMessage(content, msg);
-
-        this.channel!.ack(msg);
+        channel.ack(msg);
       } catch (err) {
         console.error("[RabbitMQ] Processing error:", err);
-
-        this.channel!.nack(msg, false, false);
+        channel.nack(msg, false, false);
       }
     });
   }

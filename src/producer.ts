@@ -1,6 +1,15 @@
 import { BaseRabbit } from "./baseRabbit.js";
 
 export class Producer extends BaseRabbit {
+  private assertedQueues = new Set<string>();
+
+  private async ensureQueue(queue: string, durable: boolean): Promise<void> {
+    if (this.assertedQueues.has(queue)) return;
+    const channel = await this.getChannel();
+    await channel.assertQueue(queue, { durable });
+    this.assertedQueues.add(queue);
+  }
+
   async publish<T>(
     queue: string,
     message: T,
@@ -8,21 +17,21 @@ export class Producer extends BaseRabbit {
       durable?: boolean;
       persistent?: boolean;
     } = {},
-  ) {
-    if (!this.channel) {
-      await this.init();
-    }
+  ): Promise<boolean> {
+    const durable = options.durable ?? true;
+    const persistent = options.persistent ?? true;
 
-    await this.channel!.assertQueue(queue, {
-      durable: options.durable ?? true,
+    await this.ensureQueue(queue, durable);
+
+    const channel = await this.getChannel();
+
+    return channel.sendToQueue(queue, Buffer.from(JSON.stringify(message)), {
+      persistent,
     });
+  }
 
-    return this.channel!.sendToQueue(
-      queue,
-      Buffer.from(JSON.stringify(message)),
-      {
-        persistent: options.persistent ?? true,
-      },
-    );
+  override async close(): Promise<void> {
+    this.assertedQueues.clear();
+    await super.close();
   }
 }
