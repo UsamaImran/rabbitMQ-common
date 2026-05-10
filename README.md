@@ -1,4 +1,4 @@
-# rabbitMQ-common
+# rabbitmq-common
 
 A lightweight, type-safe RabbitMQ client for Node.js built on top of [`amqplib`](https://www.npmjs.com/package/amqplib).
 
@@ -14,7 +14,7 @@ A lightweight, type-safe RabbitMQ client for Node.js built on top of [`amqplib`]
 ## Installation
 
 ```bash
-npm install rabbitmq-client
+npm install npm i rabbitmq-common
 ```
 
 ## Quick start
