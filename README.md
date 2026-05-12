@@ -27,7 +27,7 @@ v2 solves these problems by introducing:
 > Please read the migration guide before upgrading from v1.
 
 Looking for v1 documentation?
-See [README_V1.md](./README_V1.md)
+See [README_V1.md](./docs/v1.md)
 
 ---
 
