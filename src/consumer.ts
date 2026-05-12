@@ -4,35 +4,52 @@ import { BaseRabbit } from "./baseRabbit.js";
 export abstract class Consumer<T> extends BaseRabbit {
   abstract onMessage(data: T, originalMsg: ConsumeMessage): Promise<void>;
 
+  async onError(
+    error: Error,
+    data?: T,
+    originalMsg?: ConsumeMessage,
+  ): Promise<void> {
+    console.error(`[RabbitMQ Consumer Error]:`, error.message);
+  }
+
   async consume(
     queue: string,
-    options: {
-      durable?: boolean;
-      prefetch?: number;
-    } = {},
+    options: { prefetch?: number; useDLQ?: boolean } = {},
   ): Promise<void> {
     const channel = await this.getChannel();
-
     const prefetch = options.prefetch ?? 1;
+    const useDLQ = options.useDLQ ?? false;
 
-    if (prefetch > 0) {
-      await channel.prefetch(prefetch);
+    await channel.prefetch(prefetch);
+
+    if (useDLQ) {
+      const dlx = `${queue}_dlx`;
+      const dlq = `${queue}_failed`;
+
+      await channel.assertExchange(dlx, "direct");
+      await channel.assertQueue(dlq, { durable: true });
+      await channel.bindQueue(dlq, dlx, "dead-letter");
+
+      await channel.assertQueue(queue, {
+        durable: true,
+        deadLetterExchange: dlx,
+        deadLetterRoutingKey: "dead-letter",
+      });
+    } else {
+      await channel.assertQueue(queue, { durable: true });
     }
-
-    await channel.assertQueue(queue, {
-      durable: options.durable ?? true,
-    });
 
     await channel.consume(queue, async (msg) => {
       if (!msg) return;
 
+      let content: T | undefined;
       try {
-        const content: T = JSON.parse(msg.content.toString());
-        await this.onMessage(content, msg);
+        content = JSON.parse(msg.content.toString());
+        await this.onMessage(content!, msg);
         channel.ack(msg);
-      } catch (err) {
-        console.error("[RabbitMQ] Processing error:", err);
-        channel.nack(msg, false, false);
+      } catch (err: any) {
+        await this.onError(err, content, msg);
+        channel.nack(msg, false, !useDLQ);
       }
     });
   }

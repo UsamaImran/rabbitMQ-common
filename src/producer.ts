@@ -1,37 +1,18 @@
 import { BaseRabbit } from "./baseRabbit.js";
 
 export class Producer extends BaseRabbit {
-  private assertedQueues = new Set<string>();
+  private static assertedQueues = new Set<string>();
 
-  private async ensureQueue(queue: string, durable: boolean): Promise<void> {
-    if (this.assertedQueues.has(queue)) return;
+  async publish<T>(queue: string, message: T): Promise<boolean> {
     const channel = await this.getChannel();
-    await channel.assertQueue(queue, { durable });
-    this.assertedQueues.add(queue);
-  }
 
-  async publish<T>(
-    queue: string,
-    message: T,
-    options: {
-      durable?: boolean;
-      persistent?: boolean;
-    } = {},
-  ): Promise<boolean> {
-    const durable = options.durable ?? true;
-    const persistent = options.persistent ?? true;
-
-    await this.ensureQueue(queue, durable);
-
-    const channel = await this.getChannel();
+    if (!Producer.assertedQueues.has(queue)) {
+      await channel.assertQueue(queue, { durable: true });
+      Producer.assertedQueues.add(queue);
+    }
 
     return channel.sendToQueue(queue, Buffer.from(JSON.stringify(message)), {
-      persistent,
+      persistent: true,
     });
-  }
-
-  override async close(): Promise<void> {
-    this.assertedQueues.clear();
-    await super.close();
   }
 }
