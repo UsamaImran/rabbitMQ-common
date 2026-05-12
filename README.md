@@ -1,41 +1,51 @@
 # rabbitmq-common
 
-A lightweight, type-safe RabbitMQ client for Node.js built on top of [`amqplib`](https://www.npmjs.com/package/amqplib).
+A lightweight, type-safe RabbitMQ client for Node.js built on top of [amqplib](https://www.npmjs.com/package/amqplib).
 
 ## Features
 
-- Simple `Producer` and `Consumer` classes — no boilerplate
+- Simple `Producer` and `Consumer` abstractions
 - Automatic connection and channel management
-- Queue assertion caching — asserts once, not on every publish
-- Concurrent-safe initialisation — parallel callers share a single connection flight
-- Retriable connections — a failed attempt clears state so the next call can retry
+- Shared singleton connection management via `ConnectionManager`
+- Automatic reconnection with exponential backoff
+- Consumer auto-recovery on channel or connection loss
+- Built-in Dead Letter Queue (DLQ) support
+- Queue assertion caching for producers
 - Fully typed with TypeScript
+- Minimal boilerplate
+
+---
 
 ## Installation
 
 ```bash
-npm install npm i rabbitmq-common
+npm install rabbitmq-common
 ```
 
-## Quick start
+---
 
-### Publishing a message
+# Quick Start
 
-```typescript
-import { Producer } from "rabbitmq-client";
+## Publishing Messages
+
+```ts
+import { Producer } from "rabbitmq-common";
 
 const producer = new Producer("amqp://localhost");
 
-await producer.publish("orders", { id: 1, item: "book" });
-
-await producer.close();
+await producer.publish("orders", {
+  id: 1,
+  item: "book",
+});
 ```
 
-### Consuming messages
+---
 
-```typescript
-import { Consumer } from "rabbitmq-client";
-import type { ConsumeMessage } from "amqplib";
+## Consuming Messages
+
+```ts
+import { Consumer } from "rabbitmq-common";
+import type { ConsumeMessage } from "rabbitmq-common";
 
 class OrderConsumer extends Consumer<{ id: number; item: string }> {
   async onMessage(data: { id: number; item: string }, msg: ConsumeMessage) {
@@ -48,106 +58,258 @@ const consumer = new OrderConsumer("amqp://localhost");
 await consumer.consume("orders");
 ```
 
-## API
+---
 
-### `Producer`
+# API
 
-#### `publish<T>(queue, message, options?)`
+## `Producer`
 
-Sends a message to the given queue. Connects and asserts the queue on first use; subsequent calls to the same queue skip the assertion round-trip.
+### `publish<T>(queue, message)`
 
-| Parameter            | Type      | Default | Description                                                     |
-| -------------------- | --------- | ------- | --------------------------------------------------------------- |
-| `queue`              | `string`  | —       | Queue name                                                      |
-| `message`            | `T`       | —       | Any JSON-serialisable value                                     |
-| `options.durable`    | `boolean` | `true`  | Queue survives broker restart. Applied only on first assertion. |
-| `options.persistent` | `boolean` | `true`  | Message survives broker restart.                                |
+Publishes a persistent message to a durable queue.
 
-Returns `Promise<boolean>`. The boolean reflects whether the socket write buffer is full (`false` = back-pressure; drain the channel before sending more).
+Queues are asserted only once per process and cached internally.
 
-```typescript
-const ok = await producer.publish("jobs", { type: "email" });
-if (!ok) {
-  // socket buffer full — wait for the channel's "drain" event
+### Parameters
+
+| Parameter | Type     | Description               |
+| --------- | -------- | ------------------------- |
+| `queue`   | `string` | Queue name                |
+| `message` | `T`      | JSON-serializable payload |
+
+### Example
+
+```ts
+await producer.publish("jobs", {
+  type: "email",
+  userId: 1,
+});
+```
+
+### Returns
+
+```ts
+Promise<boolean>;
+```
+
+The boolean indicates whether the message was successfully written to the socket buffer.
+
+---
+
+# `Consumer<T>`
+
+Abstract class for consuming typed RabbitMQ messages.
+
+You must extend the class and implement `onMessage`.
+
+---
+
+## `onMessage(data, originalMsg)`
+
+Called whenever a message is received.
+
+If the method throws, the message is automatically nack'd.
+
+### Parameters
+
+| Parameter     | Type             | Description            |
+| ------------- | ---------------- | ---------------------- |
+| `data`        | `T`              | Parsed message payload |
+| `originalMsg` | `ConsumeMessage` | Raw RabbitMQ message   |
+
+---
+
+## `onError(error, data?, originalMsg?)`
+
+Optional lifecycle hook for handling consumer errors.
+
+Override this method to integrate logging systems, monitoring, or alerts.
+
+### Default implementation
+
+```ts
+async onError(error: Error) {
+  console.error(error.message);
+}
+```
+
+### Example
+
+```ts
+class EmailConsumer extends Consumer<EmailJob> {
+  async onMessage(data: EmailJob) {
+    throw new Error("SMTP unavailable");
+  }
+
+  async onError(error: Error, data?: EmailJob) {
+    console.log("Failed message:", data);
+    console.error(error);
+  }
 }
 ```
 
 ---
 
-### `Consumer<T>`
+## `consume(queue, options?)`
 
-Abstract class. Extend it and implement `onMessage`.
+Starts consuming messages from a queue.
 
-#### `onMessage(data, originalMsg)` _(abstract)_
+### Options
 
-Called for every incoming message. Throw to nack and discard; return normally to ack.
-
-| Parameter     | Type             | Description                                     |
-| ------------- | ---------------- | ----------------------------------------------- |
-| `data`        | `T`              | Parsed message payload                          |
-| `originalMsg` | `ConsumeMessage` | Raw amqplib message (headers, properties, etc.) |
-
-#### `consume(queue, options?)`
-
-Starts consuming from the given queue.
-
-| Parameter          | Type      | Default | Description                                                      |
-| ------------------ | --------- | ------- | ---------------------------------------------------------------- |
-| `queue`            | `string`  | —       | Queue name                                                       |
-| `options.durable`  | `boolean` | `true`  | Queue survives broker restart                                    |
-| `options.prefetch` | `number`  | `1`     | Max unacknowledged messages in flight. Set to `0` for unlimited. |
-
-> **Note on `prefetch`:** The default is `1`, meaning the consumer processes one message at a time before fetching the next. This is the correct default for most worker patterns. If you need higher throughput and your handler is safe to run concurrently, increase this value explicitly. To remove the limit entirely, pass `prefetch: 0`.
+| Option     | Type      | Default | Description                               |
+| ---------- | --------- | ------- | ----------------------------------------- |
+| `prefetch` | `number`  | `1`     | Maximum unacknowledged messages           |
+| `useDLQ`   | `boolean` | `false` | Enables automatic dead-letter queue setup |
 
 ---
 
-### `close()`
+## Dead Letter Queue (DLQ)
 
-Available on both `Producer` and `Consumer`. Gracefully closes the channel and connection and clears all internal state. Safe to call multiple times.
+When `useDLQ: true` is enabled:
 
-```typescript
-await producer.close();
-await consumer.close();
+- A dead-letter exchange is automatically created
+- Failed messages are routed to a failed queue
+- Messages are not requeued infinitely
+
+### Automatically created resources
+
+| Resource | Name              |
+| -------- | ----------------- |
+| DLX      | `${queue}_dlx`    |
+| DLQ      | `${queue}_failed` |
+
+### Example
+
+```ts
+await consumer.consume("payments", {
+  useDLQ: true,
+});
 ```
 
-## Error handling
+If processing fails repeatedly, failed messages are routed to:
 
-Errors thrown inside `onMessage` are caught automatically. The message is nack'd and discarded (not requeued):
+```txt
+payments_failed
+```
 
-```typescript
+---
+
+# Automatic Recovery
+
+Consumers automatically recover from:
+
+- connection loss
+- channel closure
+- broker restarts
+
+Recovery includes:
+
+- reconnecting
+- recreating channels
+- resubscribing consumers
+
+A retry attempt is automatically triggered after a short delay.
+
+---
+
+# ConnectionManager
+
+`ConnectionManager` provides shared connection management with retry support.
+
+It maintains a singleton RabbitMQ connection internally.
+
+---
+
+## `ConnectionManager.getConnection(url, maxRetries)`
+
+Returns a shared RabbitMQ connection.
+
+### Parameters
+
+| Parameter    | Type     | Description                                        |
+| ------------ | -------- | -------------------------------------------------- |
+| `url`        | `string` | RabbitMQ connection URL                            |
+| `maxRetries` | `number` | Maximum retry attempts (`-1` for infinite retries) |
+
+### Example
+
+```ts
+import { ConnectionManager } from "rabbitmq-common";
+
+const connection = await ConnectionManager.getConnection(
+  "amqp://localhost",
+  -1,
+);
+```
+
+---
+
+## Retry Strategy
+
+Failed connections retry automatically using exponential backoff.
+
+Example retry delays:
+
+```txt
+2s → 4s → 8s → 16s → 30s max
+```
+
+---
+
+# Error Handling
+
+Errors thrown inside `onMessage` are automatically handled.
+
+Behavior depends on DLQ configuration:
+
+| DLQ Enabled | Behavior                 |
+| ----------- | ------------------------ |
+| `false`     | Message is requeued      |
+| `true`      | Message is routed to DLQ |
+
+Example:
+
+```ts
 class MyConsumer extends Consumer<Job> {
   async onMessage(data: Job) {
     if (!data.id) {
-      throw new Error("bad message"); // nack + discard, consumer keeps running
+      throw new Error("Invalid payload");
     }
-    await process(data); // ack on success
   }
 }
 ```
 
-If you need dead-letter routing, configure a dead-letter exchange on the queue at the broker level.
+---
 
-## Connection lifecycle
+# Exports
 
-Connections are lazy — nothing opens until the first `publish` or `consume` call. If the connection is lost, the internal state is cleared and the next call will reconnect automatically. If the initial connection attempt fails, it is safe to retry:
+The package exports:
 
-```typescript
-// this will attempt a fresh connection each time until one succeeds
-while (true) {
-  try {
-    await producer.publish("queue", data);
-    break;
-  } catch {
-    await sleep(1000);
-  }
-}
+```ts
+import {
+  Producer,
+  Consumer,
+  ConnectionManager,
+  BaseRabbit,
+} from "rabbitmq-common";
 ```
 
-## Requirements
+It also re-exports RabbitMQ types:
+
+```ts
+import type { Channel, ChannelModel, ConsumeMessage } from "rabbitmq-common";
+```
+
+---
+
+# Requirements
 
 - Node.js 18+
-- `amqplib` peer dependency
+- RabbitMQ server
+- `amqplib`
 
-## License
+---
+
+# License
 
 MIT
