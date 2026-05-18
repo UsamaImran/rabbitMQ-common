@@ -1,8 +1,20 @@
 import type { ConsumeMessage } from "amqplib";
-import { BaseRabbit } from "./baseRabbit.js";
+import { BaseRabbit, type BaseRabbitOptions } from "./baseRabbit.js";
+import type { ConsumeOptions } from "./types.js";
 
 export abstract class Consumer<T> extends BaseRabbit {
   private isRecovering = false;
+  private recoverRetries = 0;
+  // FIX #5: respect maxRetries in recovery; default -1 = infinite (opt-in)
+  private readonly maxRecoverRetries: number;
+
+  constructor(
+    url: string,
+    options: BaseRabbitOptions & { maxRecoverRetries?: number } = {},
+  ) {
+    super(url, options);
+    this.maxRecoverRetries = options.maxRecoverRetries ?? -1;
+  }
 
   abstract onMessage(data: T, originalMsg: ConsumeMessage): Promise<void>;
 
@@ -11,12 +23,13 @@ export abstract class Consumer<T> extends BaseRabbit {
     data?: T,
     originalMsg?: ConsumeMessage,
   ): Promise<void> {
-    console.error(`[RabbitMQ Consumer Error]:`, error.message);
+    this.logger.error(`[RabbitMQ Consumer Error]: ${error.message}`);
   }
 
   async consume(
     queue: string,
-    options: { prefetch?: number; useDLQ?: boolean } = {},
+    // FIX #10: typed options instead of `any`
+    options: ConsumeOptions = {},
   ): Promise<void> {
     try {
       const channel = await this.getChannel();
@@ -43,33 +56,73 @@ export abstract class Consumer<T> extends BaseRabbit {
       await channel.consume(queue, async (msg) => {
         if (!msg) return;
         let content: T | undefined;
+        let isParseError = false;
+
         try {
-          content = JSON.parse(msg.content.toString());
+          // FIX #6: distinguish JSON parse errors from handler errors
+          try {
+            content = JSON.parse(msg.content.toString());
+          } catch (parseErr: any) {
+            isParseError = true;
+            throw new Error(`Failed to parse message: ${parseErr.message}`);
+          }
+
           await this.onMessage(content!, msg);
           channel.ack(msg);
         } catch (err: any) {
-          await this.onError(err, content, msg);
-          channel.nack(msg, false, !useDLQ);
+          // FIX #7: await onError so errors in it aren't silently swallowed
+          try {
+            await this.onError(err, content, msg);
+          } catch (handlerErr: any) {
+            this.logger.error(
+              `[RabbitMQ] onError handler threw: ${handlerErr.message}`,
+            );
+          }
+
+          // FIX #6: never requeue malformed messages — they'll loop forever
+          const requeue = isParseError ? false : !useDLQ;
+          channel.nack(msg, false, requeue);
         }
       });
 
+      // FIX #3: remove old listeners before adding new ones to prevent stacking
+      channel.removeAllListeners("close");
+      channel.removeAllListeners("error");
       channel.on("close", () => this.recover(queue, options));
       channel.on("error", () => this.recover(queue, options));
+
+      // Reset retry counter on successful connection
+      this.recoverRetries = 0;
     } catch (err) {
       await this.recover(queue, options);
     }
   }
 
-  private async recover(queue: string, options: any) {
+  // FIX #5: exponential backoff + retry limit in recovery
+  private async recover(queue: string, options: ConsumeOptions): Promise<void> {
     if (this.isRecovering) return;
+
+    if (
+      this.maxRecoverRetries !== -1 &&
+      this.recoverRetries >= this.maxRecoverRetries
+    ) {
+      this.logger.error(
+        `[RabbitMQ] Consumer for "${queue}" failed to recover after ${this.recoverRetries} attempts. Giving up.`,
+      );
+      return;
+    }
+
     this.isRecovering = true;
+    this.recoverRetries++;
 
-    console.warn(
-      `[RabbitMQ] Consumer for ${queue} lost connection. Recovering...`,
+    const delay = Math.min(Math.pow(2, this.recoverRetries) * 1000, 30000);
+    this.logger.warn(
+      `[RabbitMQ] Consumer for "${queue}" lost connection. Recovering in ${delay}ms... (attempt ${this.recoverRetries})`,
     );
-    await new Promise((res) => setTimeout(res, 5000));
 
+    await new Promise((res) => setTimeout(res, delay));
     this.isRecovering = false;
+
     return this.consume(queue, options);
   }
 }
