@@ -26,6 +26,7 @@
     "url": "https://github.com/UsamaImran/rabbitMQ-common",
     "type": "git"
   },
+  "description": "A TypeScript-first RabbitMQ utility for Node.js with cleaner producers, consumers, and reduced AMQP boilerplate.",
   "scripts": {
     "dev": "nodemon",
     "build": "tsc",
