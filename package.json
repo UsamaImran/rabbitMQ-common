@@ -27,6 +27,11 @@
     "type": "git"
   },
   "description": "A TypeScript-first RabbitMQ utility for Node.js with cleaner producers, consumers, and reduced AMQP boilerplate.",
+  "homepage": "https://github.com/UsamaImran/rabbitMQ-common#readme",
+  "bugs": {
+    "url": "https://github.com/UsamaImran/rabbitMQ-common/issues"
+  },
+  "license": "MIT",
   "scripts": {
     "dev": "nodemon",
     "build": "tsc",
