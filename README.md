@@ -659,6 +659,107 @@ Follow the [v2 migration guide](./docs/v2.md#migration-guide) first, then apply 
 
 ---
 
+# Future Directions
+
+The following capabilities are planned for upcoming releases. If any of these are relevant to your use case, feel free to open an issue or upvote an existing one.
+
+---
+
+## Exchange Support
+
+v1 through v3 are queue-only. All publishing goes directly to a named queue via the default exchange.
+
+A future release will introduce first-class exchange support, covering the three patterns RabbitMQ applications commonly need:
+
+**Fanout** — broadcast a message to all bound queues. Useful for cache invalidation, event broadcasting, and notifying multiple services of the same event.
+
+```ts
+// planned API
+await producer.publishToExchange("notifications", "fanout", payload);
+```
+
+**Topic** — route messages to queues based on a routing key pattern. Useful for multi-tenant systems, environment-scoped events, and selective subscriptions.
+
+```ts
+// planned API
+await producer.publishToExchange("events", "topic", payload, {
+  routingKey: "orders.created.eu",
+});
+```
+
+**Direct** — route messages to a specific queue by exact routing key. Useful for task routing, priority lanes, and explicit service-to-service addressing.
+
+```ts
+// planned API
+await producer.publishToExchange("tasks", "direct", payload, {
+  routingKey: "email",
+});
+```
+
+Consumers will gain a corresponding `bindQueue` option to declare and bind queues to exchanges at consume time, keeping the zero-boilerplate model the library is built around.
+
+---
+
+## RPC (Request / Reply)
+
+Support for the RabbitMQ RPC pattern — send a message and await a correlated reply — is planned as a first-class abstraction.
+
+```ts
+// planned API
+const rpc = new RpcClient("amqp://localhost");
+
+const result = await rpc.call("user-service", { userId: 42 });
+```
+
+This will handle correlation ID generation, reply queue lifecycle, and timeout management internally. A corresponding `RpcServer` abstraction will make it straightforward to implement the handler side.
+
+---
+
+## Publish Confirms
+
+Currently, `publish()` returns a boolean reflecting the socket write buffer state but does not wait for broker acknowledgement. A message can be accepted by the socket layer and still be lost if the broker crashes before writing it to disk.
+
+A future release will add opt-in confirm channel support:
+
+```ts
+// planned API
+const producer = new Producer("amqp://localhost", {
+  confirms: true,
+});
+
+await producer.publish("orders", payload); // resolves only after broker ack
+```
+
+---
+
+## Batch Publishing
+
+Publishing large volumes of messages requires multiple `await producer.publish()` calls today. A future release will add a `publishBatch()` method that sends multiple messages in a single channel operation and resolves once all are flushed.
+
+```ts
+// planned API
+await producer.publishBatch("orders", [
+  { id: 1, item: "book" },
+  { id: 2, item: "pen" },
+]);
+```
+
+---
+
+## Connection and Recovery Event Hooks
+
+There is currently no way to observe connection lifecycle events from outside the library. A future release will expose hooks for connection and recovery events, making it easier to integrate with monitoring systems, update health state, or trigger application-level logic on reconnect.
+
+```ts
+// planned API
+const producer = new Producer("amqp://localhost", {
+  onConnected: () => metrics.gauge("rabbit.connected", 1),
+  onDisconnected: () => metrics.gauge("rabbit.connected", 0),
+});
+```
+
+---
+
 # Requirements
 
 - Node.js 18+
