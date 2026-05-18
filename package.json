@@ -9,6 +9,19 @@
     "docs",
     "README.md"
   ],
+  "keywords": [
+    "rabbitmq",
+    "amqp",
+    "nodejs",
+    "typescript",
+    "microservices",
+    "message-queue",
+    "event-driven",
+    "pubsub",
+    "queue",
+    "producer",
+    "consumer"
+  ],
   "repository": {
     "url": "https://github.com/UsamaImran/rabbitMQ-common",
     "type": "git"
