@@ -1,40 +1,29 @@
-# rabbitmq-common v3
+# rabbitmq-common v4
 
 A lightweight, type-safe RabbitMQ client for Node.js built on top of [amqplib](https://www.npmjs.com/package/amqplib).
 
-`rabbitmq-common v3` is a correctness and reliability release built on top of v2. After v2 shipped, real-world usage at scale exposed a set of bugs that required applications to work around library limitations. v3 fixes these at the source, adds a pluggable logger interface, typed errors, and exposes configuration that was previously hardcoded.
+`rabbitmq-common v4` is a feature release built on top of v3. After v3 shipped fixes for connection isolation, listener stacking, and malformed message protection, the most frequently requested capability was first-class exchange support. v4 introduces that — covering fanout, topic, and direct exchange patterns — while keeping the same zero-boilerplate model the library is built around.
 
-While v2 solved the recovery and DLQ problems introduced in production, further issues emerged:
+v4 also ships several smaller improvements discovered during v3 production use:
 
-- multiple broker URLs silently shared one connection
-- consumer listeners stacked on each recovery cycle, multiplying callbacks
-- malformed messages caused infinite requeue loops
-- recovery retried forever with no backoff and no way to limit attempts
-- `ConnectionManager` could not reconnect after `close()` was called
-- `onError` was not awaited, swallowing errors thrown inside the hook
-- `console` was hardcoded — no way to plug in an application logger
-- there were no typed errors for catch blocks to target
+- `publishToExchange()` on `Producer` for all three exchange patterns
+- `ExchangeConsumeOptions` on `Consumer` — bind a queue to an exchange at consume time
+- `bindQueue()` and `unbindQueue()` on `Consumer` for runtime binding management
+- `ExchangeManager` — per-instance exchange assertion cache, exported for advanced use
+- `resetExchangeCache()` on `Producer` — mirrors `resetQueueCache()` for exchanges
+- `waitForDrain()` on `Producer` — resolves when the channel's write buffer clears
+- `forceRecover()` on `Consumer` — manually trigger recovery without waiting for a channel event
+- `getCurrentQueue()` on `Consumer` — inspect which queue is currently active
+- `isChannelReady()` and `getUrl()` on all classes — richer health and introspection surface
 
-v3 solves these problems by introducing:
-
-- per-URL connection isolation
-- listener cleanup on recovery
-- malformed message protection
-- exponential backoff and retry limits on consumer recovery
-- reusable `ConnectionManager` after shutdown
-- awaited `onError` with secondary error capture
-- pluggable `Logger` interface
-- typed error classes (`RabbitConnectionError`, `RabbitPublishError`, `RabbitConsumeError`)
-- `PublishOptions` and `QueueOptions` on `Producer`
-- `close()` and `isConnected()` on `Producer` and `Consumer`
-
-> ⚠️ v3 contains breaking changes.
-> Please read the migration guide before upgrading from v2.
+> ⚠️ v4 contains breaking changes.
+> Please read the migration guide before upgrading from v3.
 
 Looking for older documentation?
 
 - [v2 README](./docs/v2.md)
 - [v1 README](./docs/v1.md)
+- [v3 README](./docs/v3.md)
 
 ---
 
@@ -48,6 +37,9 @@ Looking for older documentation?
 - Built-in Dead Letter Queue (DLQ) support
 - Malformed message protection — JSON parse errors never requeue
 - Per-instance queue assertion caching
+- **Exchange support — fanout, topic, and direct**
+- **Per-instance exchange assertion caching**
+- **Runtime queue binding and unbinding on `Consumer`**
 - Pluggable logger interface — drop in Winston, Pino, or any compatible logger
 - Typed error classes for precise catch blocks
 - `close()` and `isConnected()` on all classes
@@ -57,25 +49,22 @@ Looking for older documentation?
 
 ---
 
-# Why v3?
+# Why v4?
 
-v2 worked well for most RabbitMQ workflows, but production deployments at scale exposed issues the library could not protect against:
+v3 worked well for queue-only workflows, but production deployments commonly needed patterns that required dropping down to `amqplib` directly:
 
-- services connecting to multiple brokers received connections for the wrong URL
-- consumers that recovered once would fire duplicate recovery callbacks on the next drop
-- a single bad message with malformed JSON could spin a queue indefinitely
-- there was no way to limit recovery attempts or add backoff between them
-- after a graceful shutdown, the connection manager could not restart without a process restart
-- errors thrown inside `onError` were silently discarded
-- `console` output could not be redirected to the application logger
+- broadcasting the same event to multiple services required one queue per consumer with no shared exchange
+- routing messages to different queues based on a key required manual exchange setup outside the library
+- there was no way to bind a consumer's queue to an existing exchange at consume time
+- exchange assertion was not cached, so high-throughput services re-asserted on every publish
 
-v3 moves these concerns into the library so applications remain simpler, safer, and easier to operate.
+v4 moves these concerns into the library so applications remain simpler and consistent whether they use queues directly or exchanges.
 
 ---
 
 # Installation
 
-```bash
+```
 npm install rabbitmq-common
 ```
 
@@ -83,9 +72,9 @@ npm install rabbitmq-common
 
 # Quick Start
 
-## Publishing Messages
+## Publishing to a queue
 
-```ts
+```typescript
 import { Producer } from "rabbitmq-common";
 
 const producer = new Producer("amqp://localhost");
@@ -96,11 +85,43 @@ await producer.publish("orders", {
 });
 ```
 
----
+## Publishing to an exchange
 
-## Consuming Messages
+```typescript
+import { Producer } from "rabbitmq-common";
 
-```ts
+const producer = new Producer("amqp://localhost");
+
+// Fanout — broadcast to all bound queues
+await producer.publishToExchange("notifications", "fanout", {
+  event: "user.signup",
+  userId: 42,
+});
+
+// Topic — route by pattern
+await producer.publishToExchange(
+  "events",
+  "topic",
+  { userId: 42 },
+  {
+    routingKey: "orders.created.eu",
+  },
+);
+
+// Direct — route by exact key
+await producer.publishToExchange(
+  "tasks",
+  "direct",
+  { type: "email" },
+  {
+    routingKey: "email",
+  },
+);
+```
+
+## Consuming from a queue
+
+```typescript
 import { Consumer } from "rabbitmq-common";
 import type { ConsumeMessage } from "rabbitmq-common";
 
@@ -111,123 +132,162 @@ class OrderConsumer extends Consumer<{ id: number; item: string }> {
 }
 
 const consumer = new OrderConsumer("amqp://localhost");
-
 await consumer.consume("orders");
 ```
 
----
+## Consuming from an exchange-bound queue
 
-# What's New in v3
+```typescript
+class NotificationConsumer extends Consumer<{ event: string; userId: number }> {
+  async onMessage(data: { event: string; userId: number }) {
+    console.log("Notification:", data);
+  }
+}
 
-## Per-URL Connection Isolation
+const consumer = new NotificationConsumer("amqp://localhost");
 
-v2 stored a single global connection regardless of URL. If two consumers connected to different brokers, the second silently received the wrong connection.
-
-v3 keys connections by URL — each broker gets its own isolated connection.
-
-```ts
-// v3 — these connect to two separate brokers correctly
-const producerA = new Producer("amqp://broker-a");
-const producerB = new Producer("amqp://broker-b");
-```
-
----
-
-## Consumer Listener Stacking Fixed
-
-v2 registered a new `channel.on("close")` and `channel.on("error")` listener on every recovery cycle. After one recovery, two callbacks fired on the next drop; after two, four — growing unboundedly.
-
-v3 calls `channel.removeAllListeners()` before re-registering listeners, keeping exactly one active at all times.
-
----
-
-## Malformed Message Protection
-
-v2 nack'd all failures with `requeue: true` on non-DLQ queues, including JSON parse errors. A message with malformed JSON would requeue and loop indefinitely.
-
-v3 distinguishes parse errors from handler errors. Malformed messages are always discarded or routed to the DLQ — never requeued.
-
-| Scenario           | `useDLQ: false` | `useDLQ: true` |
-| ------------------ | --------------- | -------------- |
-| `onMessage` throws | Requeued        | Routed to DLQ  |
-| JSON parse error   | Discarded       | Routed to DLQ  |
-
----
-
-## Recovery Backoff and Retry Limit
-
-v2 retried consumer recovery every 5 seconds forever with no backoff and no way to stop it.
-
-v3 uses the same exponential backoff as the connection layer and exposes `maxRecoverRetries` to limit attempts.
-
-```txt
-1s → 2s → 4s → 8s → 16s → 30s max
-```
-
-```ts
-const consumer = new OrderConsumer("amqp://localhost", {
-  maxRecoverRetries: 10,
+// Assert the queue and bind it to the exchange in one call
+await consumer.consume("notifications-service-a", {
+  exchange: "notifications",
+  exchangeType: "fanout",
 });
 ```
 
 ---
 
-## `onError` Is Now Awaited
+# What's New in v4
 
-v2 called `onError` without awaiting the result. Errors thrown inside the hook were silently swallowed.
+## Exchange Support
 
-v3 awaits `onError` and separately catches and logs any error it throws, so nothing is lost silently.
+v3 was queue-only — all publishing went directly to a named queue via the default exchange. Any pattern requiring fanout, topic routing, or direct exchange had to be wired manually outside the library.
 
----
+v4 introduces first-class exchange support covering the three patterns RabbitMQ applications commonly need.
 
-## `ConnectionManager` Reusable After `close()`
+### Fanout
 
-v2 permanently set `isShuttingDown = true` on `close()`. Any reconnect attempt after a graceful shutdown — common in tests and staged restarts — would always throw.
+Broadcast a message to every queue bound to the exchange. Useful for cache invalidation, event broadcasting, and notifying multiple services of the same event.
 
-v3 resets the flag after closing so the manager can reconnect cleanly without a process restart.
+```typescript
+await producer.publishToExchange("notifications", "fanout", payload);
+```
 
----
+### Topic
 
-## Pluggable Logger
+Route messages to queues based on a routing key pattern. Useful for multi-tenant systems, environment-scoped events, and selective subscriptions.
 
-v2 called `console.warn` and `console.error` directly with no interception point.
+```typescript
+await producer.publishToExchange("events", "topic", payload, {
+  routingKey: "orders.created.eu",
+});
+```
 
-v3 accepts any `Logger`-compatible object (`{ info, warn, error }`) on every class. Defaults to `console` so existing code requires no changes.
+Consumers can subscribe to a pattern:
 
-```ts
-import pino from "pino";
+```typescript
+await consumer.consume("eu-orders", {
+  exchange: "events",
+  exchangeType: "topic",
+  routingKey: "orders.*.eu",
+});
+```
 
-const logger = pino();
-const producer = new Producer("amqp://localhost", { logger });
-const consumer = new OrderConsumer("amqp://localhost", { logger });
-ConnectionManager.setLogger(logger);
+### Direct
+
+Route messages to a specific queue by exact routing key. Useful for task routing, priority lanes, and explicit service-to-service addressing.
+
+```typescript
+await producer.publishToExchange("tasks", "direct", payload, {
+  routingKey: "email",
+});
 ```
 
 ---
 
-## Typed Errors
+## Per-Instance Exchange Assertion Cache
 
-v3 exports typed error classes so catch blocks can target specific failure types without string-matching.
+Exchange assertion is now cached per `Producer` instance — the same pattern as queue assertion caching introduced in v3. On the first `publishToExchange()` call for a given exchange and type, the exchange is asserted. Subsequent publishes skip the assertion round-trip.
 
-```ts
-import { RabbitPublishError } from "rabbitmq-common";
+The cache key is `${exchange}:${type}`. Two producers with different configurations for the same exchange name each manage their own assertion independently.
 
-try {
-  await producer.publish("orders", payload);
-} catch (err) {
-  if (err instanceof RabbitPublishError) {
-    console.error(`Failed on queue "${err.queue}":`, err.message);
-  }
+Use `resetExchangeCache()` to invalidate entries after a reconnect or configuration change:
+
+```typescript
+producer.resetExchangeCache("notifications", "fanout"); // reset one
+producer.resetExchangeCache("notifications"); // reset all types for this exchange
+producer.resetExchangeCache(); // reset all
+```
+
+---
+
+## Exchange Binding on Consumer
+
+`Consumer.consume()` now accepts `exchange`, `exchangeType`, and `routingKey` in its options. When provided, the queue is asserted, the exchange is asserted, and the binding is created — all in one call.
+
+```typescript
+await consumer.consume("payments-audit", {
+  exchange: "payments",
+  exchangeType: "topic",
+  routingKey: "payments.#",
+  useDLQ: true,
+});
+```
+
+DLQ setup and exchange binding compose — enabling both flags wires the dead-letter exchange and binds the queue to the application exchange in the same consume call.
+
+---
+
+## Runtime Binding Management
+
+`Consumer` exposes `bindQueue()` and `unbindQueue()` for adding and removing exchange bindings after consume has started. This is useful for dynamic subscription changes without restarting the consumer.
+
+```typescript
+// Add a new routing key subscription at runtime
+await consumer.bindQueue("payments-audit", "payments", "payments.refund.#");
+
+// Remove a subscription
+await consumer.unbindQueue("payments-audit", "payments", "payments.#");
+```
+
+Active bindings are tracked per instance and cleaned up automatically on `close()`.
+
+---
+
+## `waitForDrain()` on Producer
+
+`publish()` and `publishToExchange()` return `false` when the channel's write buffer is full. Previously there was no built-in way to wait for the buffer to clear. v4 adds `waitForDrain()`:
+
+```typescript
+const flushed = await producer.publish("orders", payload);
+
+if (!flushed) {
+  await producer.waitForDrain();
+  // buffer is clear — safe to publish again
 }
 ```
 
 ---
 
-## Per-Instance Queue Assertion Cache
+## `forceRecover()` on Consumer
 
-v2 cached asserted queues in a static `Set` shared across all `Producer` instances. Two producers with different configurations for the same queue name would silently skip the second assertion.
+Recovery previously triggered only when the channel emitted a `close` or `error` event. v4 exposes `forceRecover()` so application code can trigger recovery directly — useful in test environments or when an external health check detects a stale consumer.
 
-v3 makes the cache per-instance so each `Producer` manages its own queue state independently.
+```typescript
+await consumer.forceRecover();
+```
+
+Recovery uses the same exponential backoff and `maxRecoverRetries` limit as automatic recovery.
+
+---
+
+## Richer Introspection
+
+All classes now expose additional inspection methods:
+
+| Method              | Returns               | Description                                     |
+| ------------------- | --------------------- | ----------------------------------------------- |
+| `isChannelReady()`  | `boolean`             | `true` if the channel is open and available     |
+| `getUrl()`          | `string`              | The broker URL this instance is connected to    |
+| `getCurrentQueue()` | `string \| undefined` | The queue name currently active on a `Consumer` |
 
 ---
 
@@ -237,7 +297,7 @@ v3 makes the cache per-instance so each `Producer` manages its own queue state i
 
 ### Constructor
 
-```ts
+```typescript
 new Producer(url: string, options?: BaseRabbitOptions)
 ```
 
@@ -252,13 +312,13 @@ new Producer(url: string, options?: BaseRabbitOptions)
 
 Publishes a persistent message to a durable queue. The queue is asserted on first use and cached — subsequent publishes skip the assertion round-trip.
 
-```ts
+```typescript
 await producer.publish("orders", { id: 1, item: "book" });
 ```
 
 With options:
 
-```ts
+```typescript
 await producer.publish(
   "orders",
   { id: 1, item: "book" },
@@ -266,6 +326,8 @@ await producer.publish(
   { durable: true, maxLength: 1000 },
 );
 ```
+
+Returns `Promise<boolean>`. `false` means the socket write buffer is full — call `waitForDrain()` before sending more.
 
 **`PublishOptions`**
 
@@ -284,17 +346,67 @@ await producer.publish(
 | `messageTtl` | `number`  | —       | Per-queue message TTL in milliseconds  |
 | `priority`   | `number`  | —       | Sets `maxPriority` on the queue        |
 
-Returns `Promise<boolean>`. `false` means the socket write buffer is full — wait for the channel's `drain` event before sending more.
+---
+
+### `publishToExchange<T>(exchange, type, message, options?)`
+
+Publishes a message to an exchange. The exchange is asserted on first use per instance and cached.
+
+```typescript
+await producer.publishToExchange("events", "topic", payload, {
+  routingKey: "orders.created.eu",
+});
+```
+
+| Parameter  | Type                     | Description                          |
+| ---------- | ------------------------ | ------------------------------------ |
+| `exchange` | `string`                 | Exchange name                        |
+| `type`     | `ExchangeType`           | `"fanout"`, `"topic"`, or `"direct"` |
+| `message`  | `T`                      | Message payload — serialized as JSON |
+| `options`  | `ExchangePublishOptions` | Optional publish options             |
+
+**`ExchangePublishOptions`**
+
+| Option       | Type      | Default | Description                                                           |
+| ------------ | --------- | ------- | --------------------------------------------------------------------- |
+| `routingKey` | `string`  | `""`    | Routing key. Required for `topic` and `direct`; ignored for `fanout`. |
+| `persistent` | `boolean` | `true`  | Message survives broker restart                                       |
+| `expiration` | `string`  | —       | Message TTL in milliseconds                                           |
+| `priority`   | `number`  | —       | Message priority                                                      |
+
+Returns `Promise<boolean>`. `false` means the write buffer is full.
+
+---
+
+### `waitForDrain()`
+
+Resolves when the channel's write buffer drains. Call after `publish()` or `publishToExchange()` returns `false`.
+
+```typescript
+await producer.waitForDrain();
+```
 
 ---
 
 ### `resetQueueCache(queue?)`
 
-Clears the internal queue assertion cache. Pass a queue name to reset one entry, or call with no arguments to reset all. Useful after reconnects when queue configuration may have changed.
+Clears the queue assertion cache. Pass a queue name to reset one entry, or call with no arguments to reset all.
 
-```ts
+```typescript
 producer.resetQueueCache("orders"); // reset one
 producer.resetQueueCache(); // reset all
+```
+
+---
+
+### `resetExchangeCache(exchange?, type?)`
+
+Clears the exchange assertion cache. Pass an exchange name and type to reset one entry, an exchange name alone to reset all types for that exchange, or call with no arguments to reset all.
+
+```typescript
+producer.resetExchangeCache("events", "topic"); // reset one
+producer.resetExchangeCache("events"); // reset all types for this exchange
+producer.resetExchangeCache(); // reset all
 ```
 
 ---
@@ -303,7 +415,7 @@ producer.resetQueueCache(); // reset all
 
 Closes the producer's channel. Safe to call multiple times.
 
-```ts
+```typescript
 await producer.close();
 ```
 
@@ -313,11 +425,23 @@ await producer.close();
 
 Returns `true` if the underlying broker connection is currently active.
 
-```ts
+```typescript
 if (!producer.isConnected()) {
   console.warn("Broker is down");
 }
 ```
+
+---
+
+### `isChannelReady()`
+
+Returns `true` if the channel is open and ready to use.
+
+---
+
+### `getUrl()`
+
+Returns the broker URL this producer is configured for.
 
 ---
 
@@ -327,7 +451,7 @@ Abstract class for consuming typed RabbitMQ messages. Extend it and implement `o
 
 ### Constructor
 
-```ts
+```typescript
 new YourConsumer(url: string, options?: BaseRabbitOptions & { maxRecoverRetries?: number })
 ```
 
@@ -354,22 +478,7 @@ Called for every incoming message. Return normally to ack. Throw to trigger `onE
 
 Optional lifecycle hook called when `onMessage` throws. Override to add logging, Sentry reporting, or metrics. Default implementation logs to the configured logger.
 
-| Parameter     | Type                          | Description                          |
-| ------------- | ----------------------------- | ------------------------------------ |
-| `error`       | `Error`                       | The error thrown by `onMessage`      |
-| `data`        | `T \| undefined`              | Parsed payload, if parsing succeeded |
-| `originalMsg` | `ConsumeMessage \| undefined` | Raw amqplib message                  |
-
-Useful for:
-
-- structured logging
-- Sentry / error tracking integration
-- failed payload inspection
-- metrics and alerting
-
-### Example
-
-```ts
+```typescript
 class EmailConsumer extends Consumer<EmailJob> {
   async onMessage(data: EmailJob) {
     throw new Error("SMTP unavailable");
@@ -387,18 +496,74 @@ class EmailConsumer extends Consumer<EmailJob> {
 
 Starts consuming messages from a queue. Automatically recovers on channel or connection loss.
 
-```ts
+```typescript
 await consumer.consume("payments", {
   useDLQ: true,
 });
 ```
 
-**Options**
+With exchange binding:
 
-| Option     | Type      | Default | Description                     |
-| ---------- | --------- | ------- | ------------------------------- |
-| `prefetch` | `number`  | `1`     | Maximum unacknowledged messages |
-| `useDLQ`   | `boolean` | `false` | Enables automatic DLQ setup     |
+```typescript
+await consumer.consume("payments-audit", {
+  exchange: "payments",
+  exchangeType: "topic",
+  routingKey: "payments.#",
+  useDLQ: true,
+});
+```
+
+**`ExchangeConsumeOptions`**
+
+| Option         | Type           | Default | Description                     |
+| -------------- | -------------- | ------- | ------------------------------- |
+| `prefetch`     | `number`       | `1`     | Maximum unacknowledged messages |
+| `useDLQ`       | `boolean`      | `false` | Enables automatic DLQ setup     |
+| `exchange`     | `string`       | —       | Exchange to bind the queue to   |
+| `exchangeType` | `ExchangeType` | —       | Required when `exchange` is set |
+| `routingKey`   | `string`       | `""`    | Routing key for the binding     |
+
+---
+
+### `bindQueue(queue, exchange, routingKey?)`
+
+Adds a binding between the active queue and an exchange at runtime. The exchange must already exist.
+
+```typescript
+await consumer.bindQueue("payments-audit", "payments", "payments.refund.#");
+```
+
+Throws if called before `consume()` or with a different queue name than the active one.
+
+---
+
+### `unbindQueue(queue, exchange, routingKey?)`
+
+Removes a binding between the active queue and an exchange.
+
+```typescript
+await consumer.unbindQueue("payments-audit", "payments", "payments.#");
+```
+
+---
+
+### `forceRecover()`
+
+Manually triggers the recovery process. Uses the same exponential backoff and retry limit as automatic recovery.
+
+```typescript
+await consumer.forceRecover();
+```
+
+---
+
+### `getCurrentQueue()`
+
+Returns the name of the queue currently being consumed, or `undefined` if `consume()` has not been called.
+
+```typescript
+console.log(consumer.getCurrentQueue()); // "payments-audit"
+```
 
 ---
 
@@ -406,7 +571,7 @@ await consumer.consume("payments", {
 
 Enable DLQ support directly from the consumer:
 
-```ts
+```typescript
 await consumer.consume("payments", {
   useDLQ: true,
 });
@@ -414,22 +579,18 @@ await consumer.consume("payments", {
 
 When enabled, the following resources are created automatically:
 
-| Resource | Naming Convention |
+| Resource | Naming convention |
 | -------- | ----------------- |
 | DLX      | `${queue}_dlx`    |
 | DLQ      | `${queue}_failed` |
 
-Failed messages are routed to `${queue}_failed` instead of being requeued. Malformed messages are always dead-lettered — never requeued — regardless of this setting.
+Failed messages are routed to `${queue}_failed` instead of being requeued. Malformed messages are always dead-lettered — never requeued — regardless of this setting. DLQ setup and exchange binding compose correctly when both are specified.
 
 ---
 
 ### `close()`
 
-Closes the consumer's channel. Safe to call multiple times.
-
-```ts
-await consumer.close();
-```
+Closes the consumer's channel and clears all tracked bindings. Safe to call multiple times.
 
 ---
 
@@ -439,11 +600,50 @@ Returns `true` if the underlying broker connection is currently active.
 
 ---
 
+### `isChannelReady()`
+
+Returns `true` if the channel is open and ready to use.
+
+---
+
+### `getUrl()`
+
+Returns the broker URL this consumer is configured for.
+
+---
+
+## `ExchangeManager`
+
+Handles exchange assertion with per-instance caching. `Producer` and `Consumer` use this internally — you only need it directly for advanced use cases such as asserting exchanges outside the normal publish/consume flow.
+
+```typescript
+import { ExchangeManager } from "rabbitmq-common";
+```
+
+### `assertExchange(channel, exchange, type, options?)`
+
+Asserts an exchange. Subsequent calls for the same `exchange:type` pair are no-ops.
+
+```typescript
+const manager = new ExchangeManager();
+await manager.assertExchange(channel, "events", "topic");
+```
+
+| Option    | Type      | Default | Description                      |
+| --------- | --------- | ------- | -------------------------------- |
+| `durable` | `boolean` | `true`  | Exchange survives broker restart |
+
+### `resetExchangeCache(exchange?, type?)`
+
+Clears the assertion cache using the same semantics as `Producer.resetExchangeCache()`.
+
+---
+
 ## `ConnectionManager`
 
 Centralized connection management. `Producer` and `Consumer` use this internally — you only need it directly for shutdown or health checks.
 
-```ts
+```typescript
 import { ConnectionManager } from "rabbitmq-common";
 ```
 
@@ -451,7 +651,7 @@ import { ConnectionManager } from "rabbitmq-common";
 
 Closes connections and resets state. Pass a URL to close one connection, or call with no arguments to close all.
 
-```ts
+```typescript
 await ConnectionManager.close(); // close all
 await ConnectionManager.close("amqp://localhost"); // close one
 ```
@@ -460,7 +660,7 @@ await ConnectionManager.close("amqp://localhost"); // close one
 
 Returns `true` if a connection for the given URL is currently active.
 
-```ts
+```typescript
 ConnectionManager.isConnected("amqp://localhost"); // boolean
 ```
 
@@ -468,7 +668,7 @@ ConnectionManager.isConnected("amqp://localhost"); // boolean
 
 Sets a global logger for all connection-level output.
 
-```ts
+```typescript
 ConnectionManager.setLogger(pino());
 ```
 
@@ -478,28 +678,16 @@ ConnectionManager.setLogger(pino());
 
 Errors thrown inside `onMessage` are automatically handled. Behavior depends on DLQ configuration:
 
-| DLQ Enabled | Behavior                 |
+| DLQ enabled | Behavior                 |
 | ----------- | ------------------------ |
 | `false`     | Message is requeued      |
 | `true`      | Message is routed to DLQ |
 
 JSON parse errors are always discarded or routed to the DLQ — never requeued.
 
-### Example
-
-```ts
-class MyConsumer extends Consumer<Job> {
-  async onMessage(data: Job) {
-    if (!data.id) {
-      throw new Error("Invalid payload");
-    }
-  }
-}
-```
-
 ### Typed Errors
 
-```ts
+```typescript
 import {
   RabbitPublishError,
   RabbitConnectionError,
@@ -507,11 +695,13 @@ import {
 } from "rabbitmq-common";
 ```
 
-| Error                   | Thrown when                        | Extra properties |
-| ----------------------- | ---------------------------------- | ---------------- |
-| `RabbitConnectionError` | Connection fails after all retries | `cause`          |
-| `RabbitPublishError`    | `publish()` fails                  | `queue`, `cause` |
-| `RabbitConsumeError`    | Consume setup fails                | `queue`, `cause` |
+| Error                   | Thrown when                                | Extra properties |
+| ----------------------- | ------------------------------------------ | ---------------- |
+| `RabbitConnectionError` | Connection fails after all retries         | `cause`          |
+| `RabbitPublishError`    | `publish()` or `publishToExchange()` fails | `queue`, `cause` |
+| `RabbitConsumeError`    | Consume setup fails                        | `queue`, `cause` |
+
+For `RabbitPublishError` thrown from `publishToExchange()`, the `queue` property holds the exchange name.
 
 ---
 
@@ -519,7 +709,7 @@ import {
 
 Any object implementing `{ info, warn, error }` is a valid logger:
 
-```ts
+```typescript
 import winston from "winston";
 
 const logger = winston.createLogger({ ... });
@@ -535,7 +725,7 @@ Defaults to `console` — existing code requires no changes.
 
 # Graceful Shutdown
 
-```ts
+```typescript
 import { ConnectionManager } from "rabbitmq-common";
 
 process.on("SIGTERM", async () => {
@@ -550,9 +740,9 @@ process.on("SIGTERM", async () => {
 
 # Health Checks
 
-```ts
+```typescript
 app.get("/health", (_req, res) => {
-  const ok = producer.isConnected();
+  const ok = producer.isConnected() && producer.isChannelReady();
   res.status(ok ? 200 : 503).json({ rabbit: ok ? "up" : "down" });
 });
 ```
@@ -561,12 +751,13 @@ app.get("/health", (_req, res) => {
 
 # Exports
 
-```ts
+```typescript
 import {
   Producer,
   Consumer,
   ConnectionManager,
   BaseRabbit,
+  ExchangeManager,
 
   // Errors
   RabbitConnectionError,
@@ -577,12 +768,16 @@ import {
 
 ## Re-exported Types
 
-```ts
+```typescript
 import type {
   Logger,
   ConsumeOptions,
   PublishOptions,
   QueueOptions,
+  ExchangeType,
+  ExchangePublishOptions,
+  ExchangeConsumeOptions,
+  ExchangeBindOptions,
   BaseRabbitOptions,
 
   // amqplib re-exports
@@ -596,109 +791,65 @@ import type {
 
 # Migration Guide
 
-## From v2
+## From v3
 
-### Constructor — `BaseRabbitOptions`
+### `consume()` — New Exchange Options
 
-`Producer` and `Consumer` now accept an options object as the second argument. The argument is optional — existing code works without changes.
+`consume()` now accepts optional `exchange`, `exchangeType`, and `routingKey` fields. Existing calls without them continue to work identically.
 
-```ts
-// v2 — still works
-const producer = new Producer("amqp://localhost");
+```typescript
+// v3 — still works
+await consumer.consume("orders");
 
-// v3 — opt into new configuration
-const producer = new Producer("amqp://localhost", {
-  maxRetries: 10,
-  logger: myLogger,
+// v4 — opt into exchange binding
+await consumer.consume("orders", {
+  exchange: "events",
+  exchangeType: "topic",
+  routingKey: "orders.#",
 });
 ```
 
----
+### `Producer` — New `publishToExchange()` Method
 
-### `publish()` — New Options Parameters
+This is additive. Existing `publish()` calls are unchanged.
 
-`publish()` now accepts optional `PublishOptions` and `QueueOptions` as third and fourth arguments. Existing calls without them continue to work with the same defaults as v2.
-
-```ts
-// v2 — still works
+```typescript
+// v3 — still works
 await producer.publish("orders", payload);
 
-// v3 — opt into message TTL, priority, or queue limits
-await producer.publish("orders", payload, { expiration: "60000" });
+// v4 — new exchange publishing
+await producer.publishToExchange("events", "topic", payload, {
+  routingKey: "orders.created",
+});
 ```
+
+### `ExchangeManager` Is Now Exported
+
+`ExchangeManager` was internal in v3 (it did not exist). v4 exports it for advanced use cases. No existing code is affected.
+
+### `ExchangeConsumeOptions` Replaces `ConsumeOptions` on `Consumer`
+
+`ExchangeConsumeOptions` extends `ConsumeOptions` — all existing fields (`prefetch`, `useDLQ`) remain. No changes required for existing consumers.
+
+### New Methods Are Additive
+
+`waitForDrain()`, `forceRecover()`, `getCurrentQueue()`, `isChannelReady()`, and `getUrl()` are all new. No existing code is affected.
 
 ---
 
-### `ConnectionManager.close()`
+## From v2
 
-Now accepts an optional URL. Calls without arguments behave identically to v2.
-
-```ts
-// v2 — still works
-await ConnectionManager.close();
-
-// v3 — new: close one specific connection
-await ConnectionManager.close("amqp://localhost");
-```
-
----
-
-### Queue Assertion Cache Is Now Per-Instance
-
-v2 cached queue assertions in a static `Set` shared across all `Producer` instances and documented this as a feature.
-
-In practice this was a bug: two producers with different configurations for the same queue name would silently skip the second assertion. v3 corrects this by making the cache per-instance.
-
-This is a **behavioral breaking change** for applications that intentionally created multiple `Producer` instances expecting shared deduplication. For the vast majority of applications — one producer per service — no change is required.
+Follow the [v3 migration guide](https://github.com/UsamaImran/rabbitMQ-common/blob/main/docs/v3.md#migration-guide) first, then apply the v3 → v4 changes above.
 
 ---
 
 ## From v1
 
-Follow the [v2 migration guide](./docs/v2.md#migration-guide) first, then apply the v2 → v3 changes above.
-
----
+Follow the [v2 migration guide](https://github.com/UsamaImran/rabbitMQ-common/blob/main/docs/v2.md#migration-guide) first, then the v2 → v3 guide, then the v3 → v4 changes above.
 
 # Future Directions
 
 The following capabilities are planned for upcoming releases. If any of these are relevant to your use case, feel free to open an issue or upvote an existing one.
-
----
-
-## Exchange Support
-
-v1 through v3 are queue-only. All publishing goes directly to a named queue via the default exchange.
-
-A future release will introduce first-class exchange support, covering the three patterns RabbitMQ applications commonly need:
-
-**Fanout** — broadcast a message to all bound queues. Useful for cache invalidation, event broadcasting, and notifying multiple services of the same event.
-
-```ts
-// planned API
-await producer.publishToExchange("notifications", "fanout", payload);
-```
-
-**Topic** — route messages to queues based on a routing key pattern. Useful for multi-tenant systems, environment-scoped events, and selective subscriptions.
-
-```ts
-// planned API
-await producer.publishToExchange("events", "topic", payload, {
-  routingKey: "orders.created.eu",
-});
-```
-
-**Direct** — route messages to a specific queue by exact routing key. Useful for task routing, priority lanes, and explicit service-to-service addressing.
-
-```ts
-// planned API
-await producer.publishToExchange("tasks", "direct", payload, {
-  routingKey: "email",
-});
-```
-
-Consumers will gain a corresponding `bindQueue` option to declare and bind queues to exchanges at consume time, keeping the zero-boilerplate model the library is built around.
-
----
 
 ## RPC (Request / Reply)
 
@@ -757,6 +908,8 @@ const producer = new Producer("amqp://localhost", {
   onDisconnected: () => metrics.gauge("rabbit.connected", 0),
 });
 ```
+
+---
 
 ---
 

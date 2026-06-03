@@ -1,15 +1,22 @@
 import type { ConsumeMessage } from "amqplib";
 import { BaseRabbit, type BaseRabbitOptions } from "./baseRabbit.js";
-import type { ConsumeOptions } from "./types.js";
-import { RabbitConsumeError } from "./types.js";
+import type { ConsumeOptions, ExchangeType } from "./types.js";
+import { ExchangeManager } from "./exchangeManager.js";
+
+export interface ExchangeConsumeOptions extends ConsumeOptions {
+  exchange?: string;
+  exchangeType?: ExchangeType;
+  routingKey?: string;
+}
 
 export abstract class Consumer<T> extends BaseRabbit {
   private isRecovering = false;
   private recoverRetries = 0;
-  // FIX #5: respect maxRetries in recovery; default -1 = infinite (opt-in)
   private readonly maxRecoverRetries: number;
   private currentQueue?: string;
-  private currentOptions?: ConsumeOptions;
+  private currentOptions?: ExchangeConsumeOptions;
+  private exchangeManager = new ExchangeManager();
+  private bindings = new Set<string>(); // Track active bindings for cleanup
 
   constructor(
     url: string,
@@ -19,11 +26,6 @@ export abstract class Consumer<T> extends BaseRabbit {
     this.maxRecoverRetries = options.maxRecoverRetries ?? -1;
   }
 
-  /**
-   * Called for every incoming message.
-   * @param data - Parsed message payload
-   * @param originalMsg - Raw amqplib message
-   */
   abstract onMessage(data: T, originalMsg: ConsumeMessage): Promise<void>;
 
   async onError(
@@ -33,7 +35,6 @@ export abstract class Consumer<T> extends BaseRabbit {
   ): Promise<void> {
     this.logger.error(`[RabbitMQ Consumer Error]: ${error.message}`);
 
-    // Log debug info if available (helps with troubleshooting)
     if (data !== undefined) {
       this.logger.info(
         `[RabbitMQ] Failed message data: ${JSON.stringify(data)}`,
@@ -46,14 +47,9 @@ export abstract class Consumer<T> extends BaseRabbit {
     }
   }
 
-  /**
-   * Starts consuming messages from a queue.
-   * Automatically recovers on channel or connection loss.
-   */
   async consume(
     queue: string,
-    // FIX #10: typed options instead of `any`
-    options: ConsumeOptions = {},
+    options: ExchangeConsumeOptions = {},
   ): Promise<void> {
     // Store for recovery
     this.currentQueue = queue;
@@ -63,9 +59,13 @@ export abstract class Consumer<T> extends BaseRabbit {
       const channel = await this.getChannel();
       const prefetch = options.prefetch ?? 1;
       const useDLQ = options.useDLQ ?? false;
+      const exchange = options.exchange;
+      const exchangeType = options.exchangeType;
+      const routingKey = options.routingKey;
 
       await channel.prefetch(prefetch);
 
+      // Step 1: Assert queue with DLQ if needed
       if (useDLQ) {
         const dlx = `${queue}_dlx`;
         const dlq = `${queue}_failed`;
@@ -81,13 +81,27 @@ export abstract class Consumer<T> extends BaseRabbit {
         await channel.assertQueue(queue, { durable: true });
       }
 
+      // Step 2: Bind to exchange if provided
+      if (exchange && exchangeType) {
+        await this.exchangeManager.assertExchange(
+          channel,
+          exchange,
+          exchangeType,
+        );
+        await channel.bindQueue(queue, exchange, routingKey ?? "");
+
+        // Track binding for cleanup
+        const bindingKey = `${exchange}:${routingKey ?? ""}`;
+        this.bindings.add(bindingKey);
+      }
+
+      // Step 3: Start consuming
       await channel.consume(queue, async (msg) => {
         if (!msg) return;
         let content: T | undefined;
         let isParseError = false;
 
         try {
-          // FIX #6: distinguish JSON parse errors from handler errors
           try {
             content = JSON.parse(msg.content.toString()) as T;
           } catch (parseErr: unknown) {
@@ -100,7 +114,6 @@ export abstract class Consumer<T> extends BaseRabbit {
           await this.onMessage(content!, msg);
           channel.ack(msg);
         } catch (err: unknown) {
-          // FIX #7: await onError so errors in it aren't silently swallowed
           const error = err instanceof Error ? err : new Error(String(err));
           try {
             await this.onError(error, content, msg);
@@ -114,19 +127,17 @@ export abstract class Consumer<T> extends BaseRabbit {
             );
           }
 
-          // FIX #6: never requeue malformed messages — they'll loop forever
           const requeue = isParseError ? false : !useDLQ;
           channel.nack(msg, false, requeue);
         }
       });
 
-      // FIX #3: remove old listeners before adding new ones to prevent stacking
+      // FIX #3: remove old listeners before adding new ones
       channel.removeAllListeners("close");
       channel.removeAllListeners("error");
       channel.on("close", () => this.recover());
       channel.on("error", () => this.recover());
 
-      // Reset retry counter on successful consumption
       this.recoverRetries = 0;
     } catch (err: unknown) {
       this.logger.error(
@@ -134,6 +145,44 @@ export abstract class Consumer<T> extends BaseRabbit {
       );
       await this.recover();
     }
+  }
+
+  async bindQueue(
+    queue: string,
+    exchange: string,
+    routingKey?: string,
+  ): Promise<void> {
+    if (!this.currentQueue || this.currentQueue !== queue) {
+      throw new Error(
+        `Cannot bind: not currently consuming from queue "${queue}"`,
+      );
+    }
+
+    const channel = await this.getChannel();
+
+    // Need exchange type to assert — for bind-only, we need the type
+    // This requires the exchange to already exist or the user to provide type
+    // Simpler: assume exchange exists (declared elsewhere or during consume)
+    await channel.bindQueue(queue, exchange, routingKey ?? "");
+
+    const bindingKey = `${exchange}:${routingKey ?? ""}`;
+    this.bindings.add(bindingKey);
+
+    this.logger.info(
+      `[RabbitMQ] Bound queue "${queue}" to exchange "${exchange}" with routing key "${routingKey ?? ""}"`,
+    );
+  }
+
+  async unbindQueue(
+    queue: string,
+    exchange: string,
+    routingKey?: string,
+  ): Promise<void> {
+    const channel = await this.getChannel();
+    await channel.unbindQueue(queue, exchange, routingKey ?? "");
+
+    const bindingKey = `${exchange}:${routingKey ?? ""}`;
+    this.bindings.delete(bindingKey);
   }
 
   getCurrentQueue(): string | undefined {
@@ -148,7 +197,6 @@ export abstract class Consumer<T> extends BaseRabbit {
     await this.recover();
   }
 
-  // FIX #5: exponential backoff + retry limit in recovery
   private async recover(): Promise<void> {
     if (this.isRecovering) return;
 
@@ -169,12 +217,12 @@ export abstract class Consumer<T> extends BaseRabbit {
       return;
     }
 
-    // FIX #11: Clean up old channel before retrying to prevent memory leaks
+    // Clean up old channel
     if (this.channel) {
       try {
         await this.channel.close();
       } catch {
-        // ignore — channel is likely already dead
+        // ignore
       }
       this.channel = undefined;
     }
@@ -190,7 +238,12 @@ export abstract class Consumer<T> extends BaseRabbit {
     await new Promise((resolve) => setTimeout(resolve, delay));
     this.isRecovering = false;
 
-    // Recursive call to restart consumption
     return this.consume(this.currentQueue, this.currentOptions);
+  }
+
+  async close(): Promise<void> {
+    // Clean up bindings before closing
+    this.bindings.clear();
+    await super.close();
   }
 }
