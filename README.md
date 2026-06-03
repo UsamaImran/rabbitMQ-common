@@ -911,8 +911,6 @@ const producer = new Producer("amqp://localhost", {
 
 ---
 
----
-
 # Requirements
 
 - Node.js 18+
