@@ -21,9 +21,9 @@ v4 also ships several smaller improvements discovered during v3 production use:
 
 Looking for older documentation?
 
-- [v3 README](https://github.com/UsamaImran/rabbitMQ-common/blob/main/docs/v3.md)
-- [v2 README](https://github.com/UsamaImran/rabbitMQ-common/blob/main/docs/v2.md)
-- [v1 README](https://github.com/UsamaImran/rabbitMQ-common/blob/main/docs/v1.md)
+- [v2 README](./docs/v2.md)
+- [v1 README](./docs/v1.md)
+- [v3 README](./docs/v3.md)
 
 ---
 
