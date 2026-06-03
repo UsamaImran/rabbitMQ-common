@@ -1,12 +1,15 @@
 import type { ConsumeMessage } from "amqplib";
 import { BaseRabbit, type BaseRabbitOptions } from "./baseRabbit.js";
 import type { ConsumeOptions } from "./types.js";
+import { RabbitConsumeError } from "./types.js";
 
 export abstract class Consumer<T> extends BaseRabbit {
   private isRecovering = false;
   private recoverRetries = 0;
   // FIX #5: respect maxRetries in recovery; default -1 = infinite (opt-in)
   private readonly maxRecoverRetries: number;
+  private currentQueue?: string;
+  private currentOptions?: ConsumeOptions;
 
   constructor(
     url: string,
@@ -16,6 +19,11 @@ export abstract class Consumer<T> extends BaseRabbit {
     this.maxRecoverRetries = options.maxRecoverRetries ?? -1;
   }
 
+  /**
+   * Called for every incoming message.
+   * @param data - Parsed message payload
+   * @param originalMsg - Raw amqplib message
+   */
   abstract onMessage(data: T, originalMsg: ConsumeMessage): Promise<void>;
 
   async onError(
@@ -24,13 +32,33 @@ export abstract class Consumer<T> extends BaseRabbit {
     originalMsg?: ConsumeMessage,
   ): Promise<void> {
     this.logger.error(`[RabbitMQ Consumer Error]: ${error.message}`);
+
+    // Log debug info if available (helps with troubleshooting)
+    if (data !== undefined) {
+      this.logger.info(
+        `[RabbitMQ] Failed message data: ${JSON.stringify(data)}`,
+      );
+    }
+    if (originalMsg?.properties?.correlationId) {
+      this.logger.info(
+        `[RabbitMQ] Correlation ID: ${originalMsg.properties.correlationId}`,
+      );
+    }
   }
 
+  /**
+   * Starts consuming messages from a queue.
+   * Automatically recovers on channel or connection loss.
+   */
   async consume(
     queue: string,
     // FIX #10: typed options instead of `any`
     options: ConsumeOptions = {},
   ): Promise<void> {
+    // Store for recovery
+    this.currentQueue = queue;
+    this.currentOptions = options;
+
     try {
       const channel = await this.getChannel();
       const prefetch = options.prefetch ?? 1;
@@ -61,21 +89,28 @@ export abstract class Consumer<T> extends BaseRabbit {
         try {
           // FIX #6: distinguish JSON parse errors from handler errors
           try {
-            content = JSON.parse(msg.content.toString());
-          } catch (parseErr: any) {
+            content = JSON.parse(msg.content.toString()) as T;
+          } catch (parseErr: unknown) {
             isParseError = true;
-            throw new Error(`Failed to parse message: ${parseErr.message}`);
+            const message =
+              parseErr instanceof Error ? parseErr.message : String(parseErr);
+            throw new Error(`Failed to parse message: ${message}`);
           }
 
           await this.onMessage(content!, msg);
           channel.ack(msg);
-        } catch (err: any) {
+        } catch (err: unknown) {
           // FIX #7: await onError so errors in it aren't silently swallowed
+          const error = err instanceof Error ? err : new Error(String(err));
           try {
-            await this.onError(err, content, msg);
-          } catch (handlerErr: any) {
+            await this.onError(error, content, msg);
+          } catch (handlerErr: unknown) {
+            const handlerMessage =
+              handlerErr instanceof Error
+                ? handlerErr.message
+                : String(handlerErr);
             this.logger.error(
-              `[RabbitMQ] onError handler threw: ${handlerErr.message}`,
+              `[RabbitMQ] onError handler threw: ${handlerMessage}`,
             );
           }
 
@@ -88,28 +123,60 @@ export abstract class Consumer<T> extends BaseRabbit {
       // FIX #3: remove old listeners before adding new ones to prevent stacking
       channel.removeAllListeners("close");
       channel.removeAllListeners("error");
-      channel.on("close", () => this.recover(queue, options));
-      channel.on("error", () => this.recover(queue, options));
+      channel.on("close", () => this.recover());
+      channel.on("error", () => this.recover());
 
-      // Reset retry counter on successful connection
+      // Reset retry counter on successful consumption
       this.recoverRetries = 0;
-    } catch (err) {
-      await this.recover(queue, options);
+    } catch (err: unknown) {
+      this.logger.error(
+        `[RabbitMQ] Initial consumption failed for "${queue}", attempting recovery...`,
+      );
+      await this.recover();
     }
   }
 
+  getCurrentQueue(): string | undefined {
+    return this.currentQueue;
+  }
+
+  async forceRecover(): Promise<void> {
+    if (!this.currentQueue || !this.currentOptions) {
+      this.logger.warn("[RabbitMQ] Cannot recover: no active consumption");
+      return;
+    }
+    await this.recover();
+  }
+
   // FIX #5: exponential backoff + retry limit in recovery
-  private async recover(queue: string, options: ConsumeOptions): Promise<void> {
+  private async recover(): Promise<void> {
     if (this.isRecovering) return;
+
+    if (!this.currentQueue || !this.currentOptions) {
+      this.logger.error(
+        "[RabbitMQ] Cannot recover: no queue or options stored",
+      );
+      return;
+    }
 
     if (
       this.maxRecoverRetries !== -1 &&
       this.recoverRetries >= this.maxRecoverRetries
     ) {
       this.logger.error(
-        `[RabbitMQ] Consumer for "${queue}" failed to recover after ${this.recoverRetries} attempts. Giving up.`,
+        `[RabbitMQ] Consumer for "${this.currentQueue}" failed to recover after ${this.recoverRetries} attempts. Giving up.`,
       );
       return;
+    }
+
+    // FIX #11: Clean up old channel before retrying to prevent memory leaks
+    if (this.channel) {
+      try {
+        await this.channel.close();
+      } catch {
+        // ignore — channel is likely already dead
+      }
+      this.channel = undefined;
     }
 
     this.isRecovering = true;
@@ -117,12 +184,13 @@ export abstract class Consumer<T> extends BaseRabbit {
 
     const delay = Math.min(Math.pow(2, this.recoverRetries) * 1000, 30000);
     this.logger.warn(
-      `[RabbitMQ] Consumer for "${queue}" lost connection. Recovering in ${delay}ms... (attempt ${this.recoverRetries})`,
+      `[RabbitMQ] Consumer for "${this.currentQueue}" lost connection. Recovering in ${delay}ms... (attempt ${this.recoverRetries})`,
     );
 
-    await new Promise((res) => setTimeout(res, delay));
+    await new Promise((resolve) => setTimeout(resolve, delay));
     this.isRecovering = false;
 
-    return this.consume(queue, options);
+    // Recursive call to restart consumption
+    return this.consume(this.currentQueue, this.currentOptions);
   }
 }

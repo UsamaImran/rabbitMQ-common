@@ -1,7 +1,3 @@
-// ─── Logger Interface ─────────────────────────────────────────────────────────
-// Allows users to plug in their own logger (Winston, Pino, etc.)
-// Defaults to console in all classes.
-
 export interface Logger {
   info(message: string, ...args: unknown[]): void;
   warn(message: string, ...args: unknown[]): void;
@@ -17,6 +13,7 @@ export class RabbitConnectionError extends Error {
   ) {
     super(message);
     this.name = "RabbitConnectionError";
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
@@ -28,6 +25,7 @@ export class RabbitPublishError extends Error {
   ) {
     super(message);
     this.name = "RabbitPublishError";
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
@@ -39,6 +37,7 @@ export class RabbitConsumeError extends Error {
   ) {
     super(message);
     this.name = "RabbitConsumeError";
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
