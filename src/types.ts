@@ -60,3 +60,25 @@ export interface QueueOptions {
   messageTtl?: number;
   priority?: number;
 }
+
+// ─── Exchange Types ──────────────────────────────────────────────────────────
+
+export type ExchangeType = "fanout" | "topic" | "direct";
+
+export interface ExchangePublishOptions {
+  routingKey?: string;
+  persistent?: boolean;
+  expiration?: string;
+  priority?: number;
+}
+
+export interface ExchangeConsumeOptions extends ConsumeOptions {
+  exchange?: string;
+  exchangeType?: ExchangeType;
+  routingKey?: string;
+}
+
+export interface ExchangeBindOptions {
+  exchange: string;
+  routingKey?: string;
+}
