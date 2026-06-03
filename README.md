@@ -847,6 +847,70 @@ Follow the [v3 migration guide](https://github.com/UsamaImran/rabbitMQ-common/bl
 
 Follow the [v2 migration guide](https://github.com/UsamaImran/rabbitMQ-common/blob/main/docs/v2.md#migration-guide) first, then the v2 → v3 guide, then the v3 → v4 changes above.
 
+# Future Directions
+
+The following capabilities are planned for upcoming releases. If any of these are relevant to your use case, feel free to open an issue or upvote an existing one.
+
+## RPC (Request / Reply)
+
+Support for the RabbitMQ RPC pattern — send a message and await a correlated reply — is planned as a first-class abstraction.
+
+```ts
+// planned API
+const rpc = new RpcClient("amqp://localhost");
+
+const result = await rpc.call("user-service", { userId: 42 });
+```
+
+This will handle correlation ID generation, reply queue lifecycle, and timeout management internally. A corresponding `RpcServer` abstraction will make it straightforward to implement the handler side.
+
+---
+
+## Publish Confirms
+
+Currently, `publish()` returns a boolean reflecting the socket write buffer state but does not wait for broker acknowledgement. A message can be accepted by the socket layer and still be lost if the broker crashes before writing it to disk.
+
+A future release will add opt-in confirm channel support:
+
+```ts
+// planned API
+const producer = new Producer("amqp://localhost", {
+  confirms: true,
+});
+
+await producer.publish("orders", payload); // resolves only after broker ack
+```
+
+---
+
+## Batch Publishing
+
+Publishing large volumes of messages requires multiple `await producer.publish()` calls today. A future release will add a `publishBatch()` method that sends multiple messages in a single channel operation and resolves once all are flushed.
+
+```ts
+// planned API
+await producer.publishBatch("orders", [
+  { id: 1, item: "book" },
+  { id: 2, item: "pen" },
+]);
+```
+
+---
+
+## Connection and Recovery Event Hooks
+
+There is currently no way to observe connection lifecycle events from outside the library. A future release will expose hooks for connection and recovery events, making it easier to integrate with monitoring systems, update health state, or trigger application-level logic on reconnect.
+
+```ts
+// planned API
+const producer = new Producer("amqp://localhost", {
+  onConnected: () => metrics.gauge("rabbit.connected", 1),
+  onDisconnected: () => metrics.gauge("rabbit.connected", 0),
+});
+```
+
+---
+
 ---
 
 # Requirements
