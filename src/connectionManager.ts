@@ -1,6 +1,12 @@
 import amqplib from "amqplib";
 import type { ChannelModel } from "amqplib";
-import { Logger } from "./types.js";
+import { Logger, RabbitConnectionError } from "./types.js";
+
+// For dependency injection in tests
+export type AmqplibModule = typeof import("amqplib");
+
+// Default to real amqplib, can be overridden for testing
+let _amqplib: AmqplibModule = amqplib;
 
 export class ConnectionManager {
   // FIX #1: Keyed by URL so multiple URLs each get their own connection
@@ -13,19 +19,39 @@ export class ConnectionManager {
     this.logger = logger;
   }
 
+  // For testing only — allows injecting a mock amqplib
+  static __setAmqplib(mock: AmqplibModule): void {
+    _amqplib = mock;
+  }
+
+  // For testing only — resets to real amqplib
+  static __resetAmqplib(): void {
+    _amqplib = amqplib;
+  }
+
   static async getConnection(
     url: string,
     maxRetries: number,
   ): Promise<ChannelModel> {
-    const existing = this.connections.get(url);
-    if (existing) return existing;
+    while (true) {
+      // Fast path: connection already exists
+      const existing = this.connections.get(url);
+      if (existing) return existing;
 
-    const pending = this.connectionPromises.get(url);
-    if (pending) return pending;
+      // Fast path: connection already being created
+      const pending = this.connectionPromises.get(url);
+      if (pending) return pending;
 
-    const promise = this.createConnectionWithRetry(url, maxRetries);
-    this.connectionPromises.set(url, promise);
-    return promise;
+      // Create promise but ensure only one caller creates it
+      const promise = this.createConnectionWithRetry(url, maxRetries);
+
+      // Try to set, but another call might have set it in the microtask gap
+      if (!this.connectionPromises.has(url)) {
+        this.connectionPromises.set(url, promise);
+      }
+
+      // Loop back — now pending will be found (or connection exists)
+    }
   }
 
   private static async createConnectionWithRetry(
@@ -36,20 +62,21 @@ export class ConnectionManager {
 
     while (!this.isShuttingDown) {
       try {
-        const conn = await amqplib.connect(url);
+        const conn = await _amqplib.connect(url);
 
         conn.on("error", () => this.clearConnection(url));
         conn.on("close", () => this.clearConnection(url));
 
         this.connections.set(url, conn);
         return conn;
-      } catch (err) {
+      } catch (err: unknown) {
         retryCount++;
 
         if (maxRetries !== -1 && retryCount >= maxRetries) {
           this.connectionPromises.delete(url);
-          throw new Error(
-            `[RabbitMQ] Connection to ${url} failed after ${retryCount} attempts.`,
+          throw new RabbitConnectionError(
+            `Connection to ${url} failed after ${retryCount} attempts.`,
+            err,
           );
         }
 
@@ -61,7 +88,7 @@ export class ConnectionManager {
       }
     }
 
-    throw new Error("[RabbitMQ] Connection process aborted.");
+    throw new RabbitConnectionError("[RabbitMQ] Connection process aborted.");
   }
 
   private static getRetryDelay(retryCount: number): number {

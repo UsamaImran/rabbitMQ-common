@@ -58,4 +58,12 @@ export abstract class BaseRabbit {
   isConnected(): boolean {
     return ConnectionManager.isConnected(this.url);
   }
+
+  isChannelReady(): boolean {
+    return !!(this.channel && !this.channel.close);
+  }
+
+  getUrl(): string {
+    return this.url;
+  }
 }

@@ -10,6 +10,14 @@ export class Producer extends BaseRabbit {
     super(url, options);
   }
 
+  /**
+   * Publishes a message to a queue.
+   * @param queue - Target queue name
+   * @param message - Message payload (will be JSON.stringify'd)
+   * @param publishOptions - Message-level options (persistent, expiration, priority)
+   * @param queueOptions - Queue declaration options (durable, maxLength, etc.)
+   * @returns Promise<boolean> - false if the socket buffer is full (call waitForDrain() before sending more)
+   */
   async publish<T>(
     queue: string,
     message: T,
@@ -40,17 +48,24 @@ export class Producer extends BaseRabbit {
           priority: publishOptions.priority,
         }),
       });
-    } catch (err) {
+    } catch (err: unknown) {
       this.channel = undefined;
+      const errorMessage = err instanceof Error ? err.message : String(err);
       throw new RabbitPublishError(
-        `Failed to publish to queue "${queue}": ${(err as Error).message}`,
+        `Failed to publish to queue "${queue}": ${errorMessage}`,
         queue,
         err,
       );
     }
   }
 
-  // Invalidate the asserted queue cache (useful after reconnection)
+  async waitForDrain(): Promise<void> {
+    const channel = await this.getChannel();
+    return new Promise((resolve) => {
+      channel.once("drain", () => resolve());
+    });
+  }
+
   resetQueueCache(queue?: string): void {
     if (queue) {
       this.assertedQueues.delete(queue);
