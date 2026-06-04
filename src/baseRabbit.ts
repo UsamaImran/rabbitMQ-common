@@ -3,9 +3,7 @@ import type { Logger } from "./types.js";
 import type { Channel } from "amqplib";
 
 export interface BaseRabbitOptions {
-  // FIX #8: maxRetries is now configurable at construction time
   maxRetries?: number;
-  // NEW: pluggable logger
   logger?: Logger;
 }
 
@@ -42,7 +40,6 @@ export abstract class BaseRabbit {
     return this.channel;
   }
 
-  // FIX #9: Exposed close() so users don't need to touch ConnectionManager directly
   async close(): Promise<void> {
     if (this.channel) {
       try {
@@ -54,13 +51,12 @@ export abstract class BaseRabbit {
     }
   }
 
-  // Health check
   isConnected(): boolean {
     return ConnectionManager.isConnected(this.url);
   }
 
   isChannelReady(): boolean {
-    return !!(this.channel && !this.channel.close);
+    return !!(this.channel && typeof this.channel.close === "function");
   }
 
   getUrl(): string {
