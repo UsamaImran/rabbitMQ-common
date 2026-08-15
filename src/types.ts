@@ -1,3 +1,9 @@
+// src/types.ts
+
+import { ConsumeMessage } from "amqplib";
+
+// ─── Logger Interface ─────────────────────────────────────────────────────────
+
 export interface Logger {
   info(message: string, ...args: unknown[]): void;
   warn(message: string, ...args: unknown[]): void;
@@ -41,24 +47,11 @@ export class RabbitConsumeError extends Error {
   }
 }
 
-// ─── Shared Option Types ──────────────────────────────────────────────────────
+// ─── Shared Types ─────────────────────────────────────────────────────────────
 
-export interface ConsumeOptions {
-  prefetch?: number;
-  useDLQ?: boolean;
-}
-
-export interface PublishOptions {
-  persistent?: boolean;
-  expiration?: string; // message TTL in ms as string, e.g. "60000"
-  priority?: number;
-}
-
-export interface QueueOptions {
-  durable?: boolean;
-  maxLength?: number;
-  messageTtl?: number;
-  priority?: number;
+export interface BaseRabbitOptions {
+  maxRetries?: number;
+  logger?: Logger;
 }
 
 // ─── Exchange Types ──────────────────────────────────────────────────────────
@@ -72,13 +65,79 @@ export interface ExchangePublishOptions {
   priority?: number;
 }
 
+export interface ExchangeBindOptions {
+  exchange: string;
+  routingKey?: string;
+}
+
+// ─── Producer Types ──────────────────────────────────────────────────────────
+
+export interface PublishOptions {
+  persistent?: boolean;
+  expiration?: string;
+  priority?: number;
+}
+
+export interface QueueOptions {
+  durable?: boolean;
+  maxLength?: number;
+  messageTtl?: number;
+  priority?: number;
+}
+
+// ─── Consumer Types ──────────────────────────────────────────────────────────
+
+export interface ConsumeOptions {
+  prefetch?: number;
+  useDLQ?: boolean;
+}
+
 export interface ExchangeConsumeOptions extends ConsumeOptions {
   exchange?: string;
   exchangeType?: ExchangeType;
   routingKey?: string;
 }
 
-export interface ExchangeBindOptions {
-  exchange: string;
-  routingKey?: string;
+export interface QueueSetupOptions {
+  useDLQ?: boolean;
+  queueOptions?: QueueOptions;
 }
+
+export interface Binding {
+  queue: string;
+  exchange: string;
+  routingKey: string;
+}
+
+export interface RecoveryOptions {
+  maxRecoverRetries?: number;
+  backoffBase?: number;
+  maxBackoff?: number;
+}
+
+// ─── Batch Publishing Types ──────────────────────────────────────────────────
+
+export interface BatchPublishResult {
+  total: number;
+  successful: number;
+  failed: number;
+  errors: BatchPublishError[];
+}
+
+export interface BatchPublishError {
+  index: number;
+  message: any;
+  error: Error;
+}
+
+// ─── Message Handler Types ──────────────────────────────────────────────────
+
+export interface MessageHandlerCallbacks<T> {
+  onMessage: (data: T, msg: ConsumeMessage) => Promise<void>;
+  onError: (error: Error, data?: T, msg?: ConsumeMessage) => Promise<void>;
+  logger?: Logger;
+}
+
+// ─── Re-export amqplib Types ────────────────────────────────────────────────
+
+export type { Channel, ChannelModel, ConsumeMessage } from "amqplib";
