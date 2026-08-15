@@ -1,10 +1,4 @@
-import type { Logger } from "../types.js";
-
-export interface RecoveryOptions {
-  maxRecoverRetries?: number;
-  backoffBase?: number;
-  maxBackoff?: number;
-}
+import { Logger, RecoveryOptions } from "../types.js";
 
 export class RecoveryManager {
   private isRecovering = false;
@@ -23,6 +17,7 @@ export class RecoveryManager {
 
   /**
    * Check if recovery should be attempted
+   * Returns true if we're under the retry limit
    */
   canRecover(): boolean {
     if (this.isRecovering) {
@@ -30,6 +25,7 @@ export class RecoveryManager {
       return false;
     }
 
+    // Check if we've already used all retries
     if (
       this.maxRecoverRetries !== -1 &&
       this.recoverRetries >= this.maxRecoverRetries
@@ -44,23 +40,35 @@ export class RecoveryManager {
   }
 
   /**
+   * Start recovery attempt - increments retry count
+   */
+  startRecovery(): void {
+    // Only increment if we're allowed to recover
+    if (
+      this.maxRecoverRetries === -1 ||
+      this.recoverRetries < this.maxRecoverRetries
+    ) {
+      this.recoverRetries++;
+      this.isRecovering = true;
+      this.logger?.warn(
+        `[RabbitMQ] Starting recovery attempt ${this.recoverRetries}`,
+      );
+    } else {
+      this.logger?.error(
+        `[RabbitMQ] Cannot start recovery: max retries (${this.maxRecoverRetries}) reached`,
+      );
+    }
+  }
+
+  /**
    * Get the next recovery delay using exponential backoff
+   * When no retries yet (recoverRetries = 0), returns backoffBase
+   * After first retry (recoverRetries = 1), returns backoffBase * 2
    */
   getNextDelay(): number {
     return Math.min(
       Math.pow(2, this.recoverRetries) * this.backoffBase,
       this.maxBackoff,
-    );
-  }
-
-  /**
-   * Start recovery attempt
-   */
-  startRecovery(): void {
-    this.isRecovering = true;
-    this.recoverRetries++;
-    this.logger?.warn(
-      `[RabbitMQ] Starting recovery attempt ${this.recoverRetries}`,
     );
   }
 

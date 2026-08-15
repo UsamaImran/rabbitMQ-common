@@ -1,5 +1,3 @@
-// src/producer/MessageSender.ts
-
 import type { Channel } from "amqplib";
 import type { PublishOptions } from "../types.js";
 

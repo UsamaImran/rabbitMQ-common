@@ -1,5 +1,3 @@
-// src/consumer/QueueSetup.ts
-
 import type { Channel } from "amqplib";
 import type { QueueOptions } from "../types.js";
 
@@ -54,9 +52,9 @@ export class QueueSetup {
     // Setup DLX exchange
     await channel.assertExchange(dlx, "direct", { durable: true });
 
-    // Setup DLQ
+    // Setup DLQ - Use the same durable option
     await channel.assertQueue(dlq, {
-      durable: true,
+      durable: queueOptions.durable ?? true,
       ...(queueOptions.maxLength && { maxLength: queueOptions.maxLength }),
       ...(queueOptions.messageTtl && { messageTtl: queueOptions.messageTtl }),
     });
@@ -66,7 +64,7 @@ export class QueueSetup {
 
     // Setup main queue with DLQ configuration
     await channel.assertQueue(queue, {
-      durable: true,
+      durable: queueOptions.durable ?? true,
       ...(queueOptions.maxLength && { maxLength: queueOptions.maxLength }),
       ...(queueOptions.messageTtl && { messageTtl: queueOptions.messageTtl }),
       ...(queueOptions.priority && { maxPriority: queueOptions.priority }),

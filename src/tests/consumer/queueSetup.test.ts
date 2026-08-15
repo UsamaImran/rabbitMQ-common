@@ -1,7 +1,7 @@
-//@ts-nocheck
+// @ts-nocheck
 
 import { describe, it, expect, beforeEach, jest } from "@jest/globals";
-import { QueueSetup } from "../../../src/consumer/queueSetup.js";
+import { QueueSetup } from "../../consumer/queueSetup.js";
 
 describe("QueueSetup", () => {
   let queueSetup: QueueSetup;
@@ -56,7 +56,7 @@ describe("QueueSetup", () => {
         { durable: true },
       );
 
-      // Should create DLQ
+      // Should create DLQ with default durable: true
       expect(mockChannel.assertQueue).toHaveBeenCalledWith(
         "test-queue_failed",
         {
@@ -89,7 +89,7 @@ describe("QueueSetup", () => {
         },
       });
 
-      // DLQ should get the same options
+      // DLQ should get the same durable option
       expect(mockChannel.assertQueue).toHaveBeenCalledWith(
         "test-queue_failed",
         {

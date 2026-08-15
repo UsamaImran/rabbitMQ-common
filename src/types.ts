@@ -1,3 +1,5 @@
+// src/types.ts
+
 import { ConsumeMessage } from "amqplib";
 
 // ─── Logger Interface ─────────────────────────────────────────────────────────
@@ -48,9 +50,7 @@ export class RabbitConsumeError extends Error {
 // ─── Shared Types ─────────────────────────────────────────────────────────────
 
 export interface BaseRabbitOptions {
-  /** Maximum retry attempts for connection recovery. -1 for infinite */
   maxRetries?: number;
-  /** Logger instance */
   logger?: Logger;
 }
 
@@ -74,7 +74,7 @@ export interface ExchangeBindOptions {
 
 export interface PublishOptions {
   persistent?: boolean;
-  expiration?: string; // message TTL in ms as string, e.g. "60000"
+  expiration?: string;
   priority?: number;
 }
 
@@ -118,22 +118,15 @@ export interface RecoveryOptions {
 // ─── Batch Publishing Types ──────────────────────────────────────────────────
 
 export interface BatchPublishResult {
-  /** Total messages attempted */
   total: number;
-  /** Number of successfully published messages */
   successful: number;
-  /** Number of failed messages */
   failed: number;
-  /** Detailed errors for failed messages */
   errors: BatchPublishError[];
 }
 
 export interface BatchPublishError {
-  /** Index of the failed message in the original array */
   index: number;
-  /** The original message that failed */
   message: any;
-  /** The error that occurred */
   error: Error;
 }
 
@@ -147,11 +140,4 @@ export interface MessageHandlerCallbacks<T> {
 
 // ─── Re-export amqplib Types ────────────────────────────────────────────────
 
-// These are commonly used types from amqplib that consumers/producers need
 export type { Channel, ChannelModel, ConsumeMessage } from "amqplib";
-
-export interface ExchangeConsumeOptions extends ConsumeOptions {
-  exchange?: string;
-  exchangeType?: ExchangeType;
-  routingKey?: string;
-}

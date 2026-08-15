@@ -7,10 +7,11 @@ export { ExchangeManager } from "./exchangeManager.js";
 export type { BaseRabbitOptions } from "./baseRabbit.js";
 
 // Errors
-export {
+export type {
   RabbitConnectionError,
   RabbitPublishError,
   RabbitConsumeError,
+  BatchPublishError,
 } from "./types.js";
 
 // Interfaces & option types
@@ -23,6 +24,7 @@ export type {
   ExchangePublishOptions,
   ExchangeConsumeOptions,
   ExchangeBindOptions,
+  BatchPublishResult,
 } from "./types.js";
 
 // Re-export amqplib types

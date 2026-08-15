@@ -1,5 +1,3 @@
-// src/producer/BatchHandler.ts
-
 import type { Channel } from "amqplib";
 import type {
   PublishOptions,

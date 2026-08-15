@@ -1,5 +1,3 @@
-// src/consumer/BindingManager.ts
-
 import type { Channel } from "amqplib";
 
 import type { ExchangeType } from "../types.js";
