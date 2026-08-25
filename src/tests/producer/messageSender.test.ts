@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, jest } from "@jest/globals";
-import { MessageSender } from "../../producer/messageSender";
+import { MessageSender } from "../../producer/messageSender.js";
 
 describe("MessageSender", () => {
   let sender: MessageSender;

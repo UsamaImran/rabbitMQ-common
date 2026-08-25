@@ -1,5 +1,5 @@
-export { Producer } from "./producer/index";
-export { Consumer } from "./consumer/index";
+export { Producer } from "./producer/index.js";
+export { Consumer } from "./consumer/index.js";
 export { ConnectionManager } from "./connectionManager.js";
 export { BaseRabbit } from "./baseRabbit.js";
 export { ExchangeManager } from "./exchangeManager.js";
