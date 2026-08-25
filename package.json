@@ -33,6 +33,7 @@
   },
   "license": "MIT",
   "scripts": {
+    "build": "tsc",
     "dev": "nodemon",
     "test": "jest",
     "test:watch": "jest --watch",
