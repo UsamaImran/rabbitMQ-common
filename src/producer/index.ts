@@ -13,22 +13,20 @@ import { MessageSender } from "./messageSender.js";
 import { QueueAssertor } from "./queueAssertor.js";
 
 export class Producer extends BaseRabbit {
-  private queueAssertor: QueueAssertor;
-  private batchHandler: BatchHandler;
-  private messageSender: MessageSender;
-  private exchangeManager: ExchangeManager;
+  private readonly queueAssertor = new QueueAssertor();
+  private readonly batchHandler = new BatchHandler();
+  private readonly messageSender = new MessageSender();
+  private readonly exchangeManager = new ExchangeManager();
 
   constructor(url: string, options: BaseRabbitOptions = {}) {
     super(url, options);
-    this.queueAssertor = new QueueAssertor();
-    this.batchHandler = new BatchHandler();
-    this.messageSender = new MessageSender();
-    this.exchangeManager = new ExchangeManager();
   }
 
-  /**
-   * Publish a single message to a queue
-   */
+  protected override onChannelInvalidated(channel: import("amqplib").Channel): void {
+    this.queueAssertor.resetForChannel(channel);
+    this.exchangeManager.resetForChannel(channel);
+  }
+
   async publish<T>(
     queue: string,
     message: T,
@@ -37,19 +35,14 @@ export class Producer extends BaseRabbit {
   ): Promise<boolean> {
     try {
       const channel = await this.getChannel();
-
-      // Delegate queue assertion
-      await this.queueAssertor.assertQueue(channel, queue, queueOptions);
-
-      // Delegate message sending
-      return this.messageSender.sendToQueue(
+      await this.queueAssertor.assertQueue(
         channel,
         queue,
-        message,
-        publishOptions,
+        { ...this.queueOptions, ...queueOptions },
+        this.useDLQ,
       );
+      return this.messageSender.sendToQueue(channel, queue, message, publishOptions);
     } catch (err: unknown) {
-      this.channel = undefined;
       const errorMessage = err instanceof Error ? err.message : String(err);
       throw new RabbitPublishError(
         `Failed to publish to queue "${queue}": ${errorMessage}`,
@@ -59,9 +52,6 @@ export class Producer extends BaseRabbit {
     }
   }
 
-  /**
-   * Publish a single message to an exchange
-   */
   async publishToExchange<T>(
     exchange: string,
     type: ExchangeType,
@@ -70,22 +60,15 @@ export class Producer extends BaseRabbit {
   ): Promise<boolean> {
     try {
       const channel = await this.getChannel();
-
-      // Delegate exchange assertion
       await this.exchangeManager.assertExchange(channel, exchange, type);
-
-      const routingKey = options.routingKey ?? "";
-
-      // Delegate message sending
       return this.messageSender.publishToExchange(
         channel,
         exchange,
-        routingKey,
+        options.routingKey ?? "",
         message,
         options,
       );
     } catch (err: unknown) {
-      this.channel = undefined;
       const errorMessage = err instanceof Error ? err.message : String(err);
       throw new RabbitPublishError(
         `Failed to publish to exchange "${exchange}": ${errorMessage}`,
@@ -95,9 +78,6 @@ export class Producer extends BaseRabbit {
     }
   }
 
-  /**
-   * Batch publish multiple messages to a queue
-   */
   async publishBatch<T>(
     queue: string,
     messages: T[],
@@ -106,33 +86,20 @@ export class Producer extends BaseRabbit {
   ): Promise<BatchPublishResult> {
     try {
       const channel = await this.getChannel();
-
-      // Delegate queue assertion (once for the batch)
-      await this.queueAssertor.assertQueue(channel, queue, queueOptions);
-
-      // Delegate batch publishing
-      const result = await this.batchHandler.publishBatch(
+      await this.queueAssertor.assertQueue(
+        channel,
+        queue,
+        { ...this.queueOptions, ...queueOptions },
+        this.useDLQ,
+      );
+      return await this.batchHandler.publishBatch(
         channel,
         queue,
         messages,
         publishOptions,
-        () => this.waitForDrain(),
+        (currentChannel) => this.waitForDrain(currentChannel),
       );
-
-      // Log results
-      if (result.failed > 0) {
-        this.logger?.warn?.(
-          `Batch publish: ${result.successful}/${result.total} succeeded, ${result.failed} failed`,
-        );
-      } else if (result.total > 0) {
-        this.logger?.info?.(
-          `Batch published ${result.total} messages to queue: ${queue}`,
-        );
-      }
-
-      return result;
     } catch (err: unknown) {
-      this.channel = undefined;
       const errorMessage = err instanceof Error ? err.message : String(err);
       throw new RabbitPublishError(
         `Failed to publish batch to queue "${queue}": ${errorMessage}`,
@@ -142,9 +109,6 @@ export class Producer extends BaseRabbit {
     }
   }
 
-  /**
-   * Batch publish multiple messages to an exchange
-   */
   async publishBatchToExchange<T>(
     exchange: string,
     type: ExchangeType,
@@ -153,36 +117,16 @@ export class Producer extends BaseRabbit {
   ): Promise<BatchPublishResult> {
     try {
       const channel = await this.getChannel();
-
-      // Delegate exchange assertion (once for the batch)
       await this.exchangeManager.assertExchange(channel, exchange, type);
-
-      const routingKey = options.routingKey ?? "";
-
-      // Delegate batch publishing
-      const result = await this.batchHandler.publishBatchToExchange(
+      return await this.batchHandler.publishBatchToExchange(
         channel,
         exchange,
-        routingKey,
+        options.routingKey ?? "",
         messages,
         options,
-        () => this.waitForDrain(),
+        (currentChannel) => this.waitForDrain(currentChannel),
       );
-
-      // Log results
-      if (result.failed > 0) {
-        this.logger?.warn?.(
-          `Batch exchange publish: ${result.successful}/${result.total} succeeded, ${result.failed} failed`,
-        );
-      } else if (result.total > 0) {
-        this.logger?.info?.(
-          `Batch published ${result.total} messages to exchange: ${exchange}`,
-        );
-      }
-
-      return result;
     } catch (err: unknown) {
-      this.channel = undefined;
       const errorMessage = err instanceof Error ? err.message : String(err);
       throw new RabbitPublishError(
         `Failed to publish batch to exchange "${exchange}": ${errorMessage}`,
@@ -192,26 +136,30 @@ export class Producer extends BaseRabbit {
     }
   }
 
-  /**
-   * Wait for the channel's write buffer to drain
-   */
-  async waitForDrain(): Promise<void> {
-    const channel = await this.getChannel();
-    return new Promise((resolve) => {
-      channel.once("drain", () => resolve());
+  async waitForDrain(channel?: import("amqplib").Channel): Promise<void> {
+    const currentChannel = channel ?? this.channel;
+    if (!currentChannel) throw new Error("RabbitMQ channel is not available");
+
+    return new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        currentChannel.removeListener("drain", onDrain);
+        currentChannel.removeListener("error", onError);
+        currentChannel.removeListener("close", onClose);
+      };
+      const onDrain = () => { cleanup(); resolve(); };
+      const onError = (error: Error) => { cleanup(); reject(error); };
+      const onClose = () => { cleanup(); reject(new Error("RabbitMQ channel closed while waiting for drain")); };
+
+      currentChannel.once("drain", onDrain);
+      currentChannel.once("error", onError);
+      currentChannel.once("close", onClose);
     });
   }
 
-  /**
-   * Reset queue assertion cache
-   */
   resetQueueCache(queue?: string): void {
     this.queueAssertor.resetCache(queue);
   }
 
-  /**
-   * Reset exchange assertion cache
-   */
   resetExchangeCache(exchange?: string, type?: ExchangeType): void {
     this.exchangeManager.resetExchangeCache(exchange, type);
   }
