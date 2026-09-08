@@ -2,8 +2,8 @@ import type { Channel } from "amqplib";
 import type { ExchangeType } from "./types.js";
 
 export class ExchangeManager {
-  // Per-instance cache (same pattern as Producer.assertedQueues)
-  private declaredExchanges = new Set<string>();
+  private channel?: Channel;
+  private declaredExchanges = new Map<string, string>();
 
   async assertExchange(
     channel: Channel,
@@ -11,28 +11,30 @@ export class ExchangeManager {
     type: ExchangeType,
     options: { durable?: boolean } = {},
   ): Promise<void> {
-    const cacheKey = `${exchange}:${type}`;
+    this.resetForChannel(channel);
+    const normalized = { durable: options.durable ?? true };
+    const cacheKey = `${exchange}\u0000${type}`;
+    const signature = JSON.stringify(normalized);
 
-    if (this.declaredExchanges.has(cacheKey)) {
-      return;
+    if (this.declaredExchanges.get(cacheKey) === signature) return;
+
+    await channel.assertExchange(exchange, type, normalized);
+    this.declaredExchanges.set(cacheKey, signature);
+  }
+
+  resetForChannel(channel: Channel): void {
+    if (this.channel !== channel) {
+      this.channel = channel;
+      this.declaredExchanges.clear();
     }
-
-    await channel.assertExchange(exchange, type, {
-      durable: options.durable ?? true,
-    });
-
-    this.declaredExchanges.add(cacheKey);
   }
 
   resetExchangeCache(exchange?: string, type?: ExchangeType): void {
     if (exchange && type) {
-      this.declaredExchanges.delete(`${exchange}:${type}`);
+      this.declaredExchanges.delete(`${exchange}\u0000${type}`);
     } else if (exchange) {
-      // Remove all caches for this exchange (any type)
       for (const key of this.declaredExchanges) {
-        if (key.startsWith(`${exchange}:`)) {
-          this.declaredExchanges.delete(key);
-        }
+        if (key.startsWith(`${exchange}\u0000`)) this.declaredExchanges.delete(key);
       }
     } else {
       this.declaredExchanges.clear();
