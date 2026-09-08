@@ -1,49 +1,56 @@
 import type { Channel } from "amqplib";
 import type { QueueOptions } from "../types.js";
 
-/**
- * Responsible for asserting queues with caching
- */
 export class QueueAssertor {
-  private assertedQueues = new Set<string>();
+  private channel?: Channel;
+  private assertedQueues = new Map<string, string>();
 
-  /**
-   * Assert a queue exists, cache the result
-   */
   async assertQueue(
     channel: Channel,
     queue: string,
     options: QueueOptions = {},
   ): Promise<void> {
-    if (this.assertedQueues.has(queue)) {
-      return;
-    }
+    this.ensureChannel(channel);
+
+    const signature = this.signature(options);
+    if (this.assertedQueues.get(queue) === signature) return;
 
     await channel.assertQueue(queue, {
       durable: options.durable ?? true,
-      ...(options.maxLength && { maxLength: options.maxLength }),
-      ...(options.messageTtl && { messageTtl: options.messageTtl }),
-      ...(options.priority && { maxPriority: options.priority }),
+      ...(options.maxLength !== undefined && { maxLength: options.maxLength }),
+      ...(options.messageTtl !== undefined && { messageTtl: options.messageTtl }),
+      ...(options.priority !== undefined && { maxPriority: options.priority }),
     });
 
-    this.assertedQueues.add(queue);
+    this.assertedQueues.set(queue, signature);
   }
 
-  /**
-   * Reset the cache for one or all queues
-   */
   resetCache(queue?: string): void {
-    if (queue) {
-      this.assertedQueues.delete(queue);
-    } else {
+    if (queue) this.assertedQueues.delete(queue);
+    else this.assertedQueues.clear();
+  }
+
+  isAsserted(queue: string): boolean {
+    return this.assertedQueues.has(queue);
+  }
+
+  resetForChannel(channel: Channel): void {
+    if (this.channel !== channel) {
+      this.channel = channel;
       this.assertedQueues.clear();
     }
   }
 
-  /**
-   * Check if a queue has been asserted
-   */
-  isAsserted(queue: string): boolean {
-    return this.assertedQueues.has(queue);
+  private ensureChannel(channel: Channel): void {
+    this.resetForChannel(channel);
+  }
+
+  private signature(options: QueueOptions): string {
+    return JSON.stringify({
+      durable: options.durable ?? true,
+      maxLength: options.maxLength,
+      messageTtl: options.messageTtl,
+      priority: options.priority,
+    });
   }
 }
