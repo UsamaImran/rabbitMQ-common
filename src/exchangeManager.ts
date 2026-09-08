@@ -30,7 +30,7 @@ export class ExchangeManager {
   resetExchangeCache(exchange?: string, type?: ExchangeType): void {
     if (exchange && type) this.declaredExchanges.delete(`${exchange}\u0000${type}`);
     else if (exchange) {
-      for (const key of this.declaredExchanges) {
+      for (const key of this.declaredExchanges.keys()) {
         if (key.startsWith(`${exchange}\u0000`)) this.declaredExchanges.delete(key);
       }
     } else this.declaredExchanges.clear();
