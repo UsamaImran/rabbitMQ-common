@@ -9,18 +9,34 @@ export class QueueAssertor {
     channel: Channel,
     queue: string,
     options: QueueOptions = {},
+    useDLQ = false,
   ): Promise<void> {
-    this.ensureChannel(channel);
+    this.resetForChannel(channel);
 
-    const signature = this.signature(options);
+    const signature = this.signature(options, useDLQ);
     if (this.assertedQueues.get(queue) === signature) return;
 
-    await channel.assertQueue(queue, {
-      durable: options.durable ?? true,
-      ...(options.maxLength !== undefined && { maxLength: options.maxLength }),
-      ...(options.messageTtl !== undefined && { messageTtl: options.messageTtl }),
-      ...(options.priority !== undefined && { maxPriority: options.priority }),
-    });
+    const queueArguments = this.queueArguments(options);
+    if (useDLQ) {
+      const dlx = `${queue}_dlx`;
+      const dlq = `${queue}_failed`;
+
+      await channel.assertExchange(dlx, "direct", { durable: true });
+      await channel.assertQueue(dlq, {
+        durable: options.durable ?? true,
+        ...(options.maxLength !== undefined && { maxLength: options.maxLength }),
+        ...(options.messageTtl !== undefined && { messageTtl: options.messageTtl }),
+      });
+      await channel.bindQueue(dlq, dlx, "dead-letter");
+
+      await channel.assertQueue(queue, {
+        ...queueArguments,
+        deadLetterExchange: dlx,
+        deadLetterRoutingKey: "dead-letter",
+      });
+    } else {
+      await channel.assertQueue(queue, queueArguments);
+    }
 
     this.assertedQueues.set(queue, signature);
   }
@@ -41,16 +57,16 @@ export class QueueAssertor {
     }
   }
 
-  private ensureChannel(channel: Channel): void {
-    this.resetForChannel(channel);
+  private queueArguments(options: QueueOptions) {
+    return {
+      durable: options.durable ?? true,
+      ...(options.maxLength !== undefined && { maxLength: options.maxLength }),
+      ...(options.messageTtl !== undefined && { messageTtl: options.messageTtl }),
+      ...(options.priority !== undefined && { maxPriority: options.priority }),
+    };
   }
 
-  private signature(options: QueueOptions): string {
-    return JSON.stringify({
-      durable: options.durable ?? true,
-      maxLength: options.maxLength,
-      messageTtl: options.messageTtl,
-      priority: options.priority,
-    });
+  private signature(options: QueueOptions, useDLQ: boolean): string {
+    return JSON.stringify({ ...this.queueArguments(options), useDLQ });
   }
 }
