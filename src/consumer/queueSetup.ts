@@ -10,23 +10,17 @@ export class QueueSetup {
   private channel?: Channel;
   private assertedQueues = new Map<string, string>();
 
-  async setupQueue(
-    channel: Channel,
-    queue: string,
-    options: QueueSetupOptions = {},
-  ): Promise<void> {
+  async setupQueue(channel: Channel, queue: string, options: QueueSetupOptions = {}): Promise<void> {
     this.resetForChannel(channel);
     const useDLQ = options.useDLQ ?? false;
     const queueOptions = options.queueOptions ?? {};
     const signature = this.signature(queueOptions, useDLQ);
-
     if (this.assertedQueues.get(queue) === signature) return;
 
     const queueArguments = this.queueArguments(queueOptions);
     if (useDLQ) {
       const dlx = `${queue}_dlx`;
       const dlq = `${queue}_failed`;
-
       await channel.assertExchange(dlx, "direct", { durable: true });
       await channel.assertQueue(dlq, {
         durable: queueOptions.durable ?? true,
@@ -42,7 +36,6 @@ export class QueueSetup {
     } else {
       await channel.assertQueue(queue, queueArguments);
     }
-
     this.assertedQueues.set(queue, signature);
   }
 
@@ -51,6 +44,11 @@ export class QueueSetup {
       this.channel = channel;
       this.assertedQueues.clear();
     }
+  }
+
+  invalidateChannel(channel: Channel): void {
+    if (this.channel === channel) this.channel = undefined;
+    this.assertedQueues.clear();
   }
 
   resetCache(queue?: string): void {
