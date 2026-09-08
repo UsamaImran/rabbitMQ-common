@@ -7,87 +7,71 @@ export interface QueueSetupOptions {
 }
 
 export class QueueSetup {
-  private assertedQueues = new Set<string>();
+  private channel?: Channel;
+  private assertedQueues = new Map<string, string>();
 
-  /**
-   * Setup a queue with optional DLQ configuration
-   */
   async setupQueue(
     channel: Channel,
     queue: string,
     options: QueueSetupOptions = {},
   ): Promise<void> {
-    const { useDLQ = false, queueOptions = {} } = options;
+    this.resetForChannel(channel);
+    const useDLQ = options.useDLQ ?? false;
+    const queueOptions = options.queueOptions ?? {};
+    const signature = this.signature(queueOptions, useDLQ);
 
-    // Check cache
-    if (this.assertedQueues.has(queue)) {
-      return;
-    }
+    if (this.assertedQueues.get(queue) === signature) return;
 
+    const queueArguments = this.queueArguments(queueOptions);
     if (useDLQ) {
-      await this.setupQueueWithDLQ(channel, queue, queueOptions);
-    } else {
-      await channel.assertQueue(queue, {
+      const dlx = `${queue}_dlx`;
+      const dlq = `${queue}_failed`;
+
+      await channel.assertExchange(dlx, "direct", { durable: true });
+      await channel.assertQueue(dlq, {
         durable: queueOptions.durable ?? true,
-        ...(queueOptions.maxLength && { maxLength: queueOptions.maxLength }),
-        ...(queueOptions.messageTtl && { messageTtl: queueOptions.messageTtl }),
-        ...(queueOptions.priority && { maxPriority: queueOptions.priority }),
+        ...(queueOptions.maxLength !== undefined && { maxLength: queueOptions.maxLength }),
+        ...(queueOptions.messageTtl !== undefined && { messageTtl: queueOptions.messageTtl }),
       });
+      await channel.bindQueue(dlq, dlx, "dead-letter");
+      await channel.assertQueue(queue, {
+        ...queueArguments,
+        deadLetterExchange: dlx,
+        deadLetterRoutingKey: "dead-letter",
+      });
+    } else {
+      await channel.assertQueue(queue, queueArguments);
     }
 
-    this.assertedQueues.add(queue);
+    this.assertedQueues.set(queue, signature);
   }
 
-  /**
-   * Setup queue with Dead Letter Queue
-   */
-  private async setupQueueWithDLQ(
-    channel: Channel,
-    queue: string,
-    queueOptions: QueueOptions = {},
-  ): Promise<void> {
-    const dlx = `${queue}_dlx`;
-    const dlq = `${queue}_failed`;
-
-    // Setup DLX exchange
-    await channel.assertExchange(dlx, "direct", { durable: true });
-
-    // Setup DLQ - Use the same durable option
-    await channel.assertQueue(dlq, {
-      durable: queueOptions.durable ?? true,
-      ...(queueOptions.maxLength && { maxLength: queueOptions.maxLength }),
-      ...(queueOptions.messageTtl && { messageTtl: queueOptions.messageTtl }),
-    });
-
-    // Bind DLQ to DLX
-    await channel.bindQueue(dlq, dlx, "dead-letter");
-
-    // Setup main queue with DLQ configuration
-    await channel.assertQueue(queue, {
-      durable: queueOptions.durable ?? true,
-      ...(queueOptions.maxLength && { maxLength: queueOptions.maxLength }),
-      ...(queueOptions.messageTtl && { messageTtl: queueOptions.messageTtl }),
-      ...(queueOptions.priority && { maxPriority: queueOptions.priority }),
-      deadLetterExchange: dlx,
-      deadLetterRoutingKey: "dead-letter",
-    });
-  }
-
-  /**
-   * Reset cache for a specific queue
-   */
-  resetCache(queue?: string): void {
-    if (queue) {
-      this.assertedQueues.delete(queue);
-    } else {
+  resetForChannel(channel: Channel): void {
+    if (this.channel !== channel) {
+      this.channel = channel;
       this.assertedQueues.clear();
     }
   }
 
-  /**
-   * Check if queue is set up
-   */
+  resetCache(queue?: string): void {
+    if (queue) this.assertedQueues.delete(queue);
+    else this.assertedQueues.clear();
+  }
+
   isSetUp(queue: string): boolean {
     return this.assertedQueues.has(queue);
+  }
+
+  private queueArguments(options: QueueOptions) {
+    return {
+      durable: options.durable ?? true,
+      ...(options.maxLength !== undefined && { maxLength: options.maxLength }),
+      ...(options.messageTtl !== undefined && { messageTtl: options.messageTtl }),
+      ...(options.priority !== undefined && { maxPriority: options.priority }),
+    };
+  }
+
+  private signature(options: QueueOptions, useDLQ: boolean): string {
+    return JSON.stringify({ ...this.queueArguments(options), useDLQ });
   }
 }
