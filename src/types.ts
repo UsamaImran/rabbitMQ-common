@@ -1,8 +1,4 @@
-// src/types.ts
-
-import { ConsumeMessage } from "amqplib";
-
-// ─── Logger Interface ─────────────────────────────────────────────────────────
+import type { ConsumeMessage } from "amqplib";
 
 export interface Logger {
   info(message: string, ...args: unknown[]): void;
@@ -10,13 +6,8 @@ export interface Logger {
   error(message: string, ...args: unknown[]): void;
 }
 
-// ─── Custom Error Classes ─────────────────────────────────────────────────────
-
 export class RabbitConnectionError extends Error {
-  constructor(
-    message: string,
-    public readonly cause?: unknown,
-  ) {
+  constructor(message: string, public readonly cause?: unknown) {
     super(message);
     this.name = "RabbitConnectionError";
     Object.setPrototypeOf(this, new.target.prototype);
@@ -47,14 +38,13 @@ export class RabbitConsumeError extends Error {
   }
 }
 
-// ─── Shared Types ─────────────────────────────────────────────────────────────
-
 export interface BaseRabbitOptions {
   maxRetries?: number;
   logger?: Logger;
+  /** Dead-lettering is immutable instance topology configuration. */
+  useDLQ?: boolean;
+  queueOptions?: QueueOptions;
 }
-
-// ─── Exchange Types ──────────────────────────────────────────────────────────
 
 export type ExchangeType = "fanout" | "topic" | "direct";
 
@@ -70,8 +60,6 @@ export interface ExchangeBindOptions {
   routingKey?: string;
 }
 
-// ─── Producer Types ──────────────────────────────────────────────────────────
-
 export interface PublishOptions {
   persistent?: boolean;
   expiration?: string;
@@ -85,11 +73,8 @@ export interface QueueOptions {
   priority?: number;
 }
 
-// ─── Consumer Types ──────────────────────────────────────────────────────────
-
 export interface ConsumeOptions {
   prefetch?: number;
-  useDLQ?: boolean;
 }
 
 export interface ExchangeConsumeOptions extends ConsumeOptions {
@@ -106,6 +91,7 @@ export interface QueueSetupOptions {
 export interface Binding {
   queue: string;
   exchange: string;
+  exchangeType: ExchangeType;
   routingKey: string;
 }
 
@@ -113,9 +99,8 @@ export interface RecoveryOptions {
   maxRecoverRetries?: number;
   backoffBase?: number;
   maxBackoff?: number;
+  jitter?: number;
 }
-
-// ─── Batch Publishing Types ──────────────────────────────────────────────────
 
 export interface BatchPublishResult {
   total: number;
@@ -126,18 +111,14 @@ export interface BatchPublishResult {
 
 export interface BatchPublishError {
   index: number;
-  message: any;
+  message: unknown;
   error: Error;
 }
-
-// ─── Message Handler Types ──────────────────────────────────────────────────
 
 export interface MessageHandlerCallbacks<T> {
   onMessage: (data: T, msg: ConsumeMessage) => Promise<void>;
   onError: (error: Error, data?: T, msg?: ConsumeMessage) => Promise<void>;
   logger?: Logger;
 }
-
-// ─── Re-export amqplib Types ────────────────────────────────────────────────
 
 export type { Channel, ChannelModel, ConsumeMessage } from "amqplib";

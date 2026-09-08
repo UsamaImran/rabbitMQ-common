@@ -1,95 +1,74 @@
 import type { Channel } from "amqplib";
-
-import type { ExchangeType } from "../types.js";
+import type { Binding, ExchangeType } from "../types.js";
 import { ExchangeManager } from "../exchangeManager.js";
 
-export interface Binding {
-  queue: string;
-  exchange: string;
-  routingKey: string;
-}
-
 export class BindingManager {
-  private bindings = new Set<string>();
+  private bindings = new Map<string, Binding>();
   private exchangeManager = new ExchangeManager();
 
-  /**
-   * Bind a queue to an exchange
-   */
   async bind(
     channel: Channel,
     queue: string,
     exchange: string,
     exchangeType: ExchangeType,
-    routingKey: string = "",
+    routingKey = "",
   ): Promise<void> {
-    // Assert exchange exists
+    this.exchangeManager.resetForChannel(channel);
     await this.exchangeManager.assertExchange(channel, exchange, exchangeType);
-
-    // Bind queue to exchange
     await channel.bindQueue(queue, exchange, routingKey);
 
-    // Track binding
-    const bindingKey = this.getBindingKey(queue, exchange, routingKey);
-    this.bindings.add(bindingKey);
+    const binding = { queue, exchange, exchangeType, routingKey };
+    this.bindings.set(this.getBindingKey(binding), binding);
   }
 
-  /**
-   * Unbind a queue from an exchange
-   */
   async unbind(
     channel: Channel,
     queue: string,
     exchange: string,
-    routingKey: string = "",
+    routingKey = "",
   ): Promise<void> {
     await channel.unbindQueue(queue, exchange, routingKey);
-
-    const bindingKey = this.getBindingKey(queue, exchange, routingKey);
-    this.bindings.delete(bindingKey);
+    this.bindings.delete(this.getBindingKey({ queue, exchange, exchangeType: "direct", routingKey }));
+    // Remove by queue/exchange/routing key regardless of exchange type.
+    for (const [key, binding] of this.bindings) {
+      if (binding.queue === queue && binding.exchange === exchange && binding.routingKey === routingKey) {
+        this.bindings.delete(key);
+      }
+    }
   }
 
-  /**
-   * Check if a binding exists
-   */
-  hasBinding(
-    queue: string,
-    exchange: string,
-    routingKey: string = "",
-  ): boolean {
-    const bindingKey = this.getBindingKey(queue, exchange, routingKey);
-    return this.bindings.has(bindingKey);
+  async restore(channel: Channel): Promise<void> {
+    for (const binding of this.bindings.values()) {
+      await this.exchangeManager.assertExchange(
+        channel,
+        binding.exchange,
+        binding.exchangeType,
+      );
+      await channel.bindQueue(binding.queue, binding.exchange, binding.routingKey);
+    }
   }
 
-  /**
-   * Get all active bindings
-   */
+  hasBinding(queue: string, exchange: string, routingKey = ""): boolean {
+    return Array.from(this.bindings.values()).some(
+      (binding) => binding.queue === queue && binding.exchange === exchange && binding.routingKey === routingKey,
+    );
+  }
+
   getActiveBindings(): string[] {
-    return Array.from(this.bindings);
+    return Array.from(this.bindings.values()).map(
+      ({ queue, exchange, routingKey }) => `${queue}:${exchange}:${routingKey}`,
+    );
   }
 
-  /**
-   * Clear all tracked bindings
-   */
   clear(): void {
     this.bindings.clear();
   }
 
-  /**
-   * Get binding key for tracking
-   */
-  private getBindingKey(
-    queue: string,
-    exchange: string,
-    routingKey: string,
-  ): string {
-    return `${queue}:${exchange}:${routingKey}`;
-  }
-
-  /**
-   * Reset exchange cache
-   */
   resetExchangeCache(exchange?: string, type?: ExchangeType): void {
     this.exchangeManager.resetExchangeCache(exchange, type);
+  }
+
+  private getBindingKey(binding: Binding): string {
+    return `${binding.queue}\u0000${binding.exchange}\u0000${binding.routingKey}`;
   }
 }

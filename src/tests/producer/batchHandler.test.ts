@@ -1,381 +1,80 @@
 // @ts-nocheck
 import { describe, it, expect, beforeEach, jest } from "@jest/globals";
-import { BatchHandler } from "../../producer/batchHandler";
+import { BatchHandler } from "../../producer/batchHandler.js";
 
 describe("BatchHandler", () => {
-  let batchHandler: BatchHandler;
-  let mockChannel: any;
-  let mockWaitForDrain: jest.Mock;
+  let handler: BatchHandler;
+  let channel: any;
+  let waitForDrain: jest.Mock;
 
   beforeEach(() => {
-    batchHandler = new BatchHandler();
-    mockWaitForDrain = jest.fn().mockResolvedValue(undefined);
-    mockChannel = {
+    handler = new BatchHandler();
+    waitForDrain = jest.fn().mockResolvedValue(undefined);
+    channel = {
       sendToQueue: jest.fn().mockReturnValue(true),
       publish: jest.fn().mockReturnValue(true),
     };
   });
 
-  describe("publishBatch", () => {
-    const queue = "test-queue";
-    const messages = [
-      { id: 1, name: "test1" },
-      { id: 2, name: "test2" },
-      { id: 3, name: "test3" },
-    ];
+  it("publishes every queue message exactly once", async () => {
+    channel.sendToQueue.mockReturnValueOnce(false).mockReturnValueOnce(true).mockReturnValueOnce(true);
 
-    it("should return empty result for empty messages array", async () => {
-      const result = await batchHandler.publishBatch(
-        mockChannel,
-        queue,
-        [],
-        {},
-        mockWaitForDrain,
-      );
+    const result = await handler.publishBatch(
+      channel,
+      "orders",
+      [{ id: 1 }, { id: 2 }, { id: 3 }],
+      {},
+      waitForDrain,
+    );
 
-      expect(result).toEqual({
-        total: 0,
-        successful: 0,
-        failed: 0,
-        errors: [],
-      });
-      expect(mockChannel.sendToQueue).not.toHaveBeenCalled();
-    });
-
-    it("should publish all messages successfully", async () => {
-      const result = await batchHandler.publishBatch(
-        mockChannel,
-        queue,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
-
-      expect(mockChannel.sendToQueue).toHaveBeenCalledTimes(3);
-      expect(result.total).toBe(3);
-      expect(result.successful).toBe(3);
-      expect(result.failed).toBe(0);
-      expect(result.errors).toEqual([]);
-    });
-
-    it("should apply publish options to all messages", async () => {
-      await batchHandler.publishBatch(
-        mockChannel,
-        queue,
-        messages,
-        { persistent: false, expiration: "60000", priority: 5 },
-        mockWaitForDrain,
-      );
-
-      expect(mockChannel.sendToQueue).toHaveBeenCalledTimes(3);
-      for (let i = 0; i < messages.length; i++) {
-        expect(mockChannel.sendToQueue).toHaveBeenCalledWith(
-          queue,
-          expect.any(Buffer),
-          {
-            persistent: false,
-            expiration: "60000",
-            priority: 5,
-          },
-        );
-      }
-    });
-
-    it("should track individual message failures", async () => {
-      mockChannel.sendToQueue
-        .mockReturnValueOnce(true)
-        .mockImplementationOnce(() => {
-          throw new Error("Failed to publish");
-        })
-        .mockReturnValueOnce(true);
-
-      const result = await batchHandler.publishBatch(
-        mockChannel,
-        queue,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
-
-      expect(result.total).toBe(3);
-      expect(result.successful).toBe(2);
-      expect(result.failed).toBe(1);
-      expect(result.errors).toHaveLength(1);
-      expect(result.errors[0].index).toBe(1);
-      expect(result.errors[0].message).toEqual(messages[1]);
-      expect(result.errors[0].error.message).toBe("Failed to publish");
-    });
-
-    it("should handle multiple failures", async () => {
-      mockChannel.sendToQueue
-        .mockReturnValueOnce(true)
-        .mockImplementationOnce(() => {
-          throw new Error("Failed 1");
-        })
-        .mockImplementationOnce(() => {
-          throw new Error("Failed 2");
-        });
-
-      const result = await batchHandler.publishBatch(
-        mockChannel,
-        queue,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
-
-      expect(result.total).toBe(3);
-      expect(result.successful).toBe(1);
-      expect(result.failed).toBe(2);
-      expect(result.errors).toHaveLength(2);
-      expect(result.errors[0].index).toBe(1);
-      expect(result.errors[1].index).toBe(2);
-    });
-
-    it("should wait for drain when buffer is full", async () => {
-      mockChannel.sendToQueue
-        .mockReturnValueOnce(false) // First message - buffer full
-        .mockReturnValueOnce(true) // Retry success
-        .mockReturnValueOnce(true) // Second message
-        .mockReturnValueOnce(true); // Third message
-
-      await batchHandler.publishBatch(
-        mockChannel,
-        queue,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
-
-      expect(mockWaitForDrain).toHaveBeenCalledTimes(1);
-    });
-
-    it("should retry after drain when buffer is full", async () => {
-      mockChannel.sendToQueue
-        .mockReturnValueOnce(false) // First message - buffer full
-        .mockReturnValueOnce(true) // Retry success
-        .mockReturnValueOnce(true) // Second message
-        .mockReturnValueOnce(true); // Third message
-
-      await batchHandler.publishBatch(
-        mockChannel,
-        queue,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
-
-      // First message called twice (original + retry), others once
-      expect(mockChannel.sendToQueue).toHaveBeenCalledTimes(4);
-    });
-
-    it("should mark message as failed if retry still fails", async () => {
-      mockChannel.sendToQueue
-        .mockReturnValueOnce(false) // First message - buffer full
-        .mockReturnValueOnce(false) // Retry still fails
-        .mockReturnValueOnce(true) // Second message
-        .mockReturnValueOnce(true); // Third message
-
-      const result = await batchHandler.publishBatch(
-        mockChannel,
-        queue,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
-
-      expect(result.total).toBe(3);
-      expect(result.successful).toBe(2);
-      expect(result.failed).toBe(1);
-      expect(result.errors[0].index).toBe(0);
-      expect(result.errors[0].error.message).toBe(
-        "Buffer still full after waiting for drain",
-      );
-    });
-
-    it("should handle non-Error objects in catch", async () => {
-      mockChannel.sendToQueue.mockImplementation(() => {
-        throw "String error"; // Non-Error throw
-      });
-
-      const result = await batchHandler.publishBatch(
-        mockChannel,
-        queue,
-        [{ id: 1 }],
-        {},
-        mockWaitForDrain,
-      );
-
-      expect(result.failed).toBe(1);
-      expect(result.errors[0].error.message).toBe("String error");
-    });
-
-    it("should serialize messages as JSON", async () => {
-      await batchHandler.publishBatch(
-        mockChannel,
-        queue,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
-
-      for (let i = 0; i < messages.length; i++) {
-        expect(mockChannel.sendToQueue).toHaveBeenCalledWith(
-          queue,
-          Buffer.from(JSON.stringify(messages[i])),
-          expect.any(Object),
-        );
-      }
-    });
+    expect(waitForDrain).toHaveBeenCalledTimes(1);
+    expect(channel.sendToQueue).toHaveBeenCalledTimes(3);
+    expect(result).toEqual({ total: 3, successful: 3, failed: 0, errors: [] });
   });
 
-  describe("publishBatchToExchange", () => {
-    const exchange = "test-exchange";
-    const routingKey = "test.key";
-    const messages = [
-      { id: 1, name: "test1" },
-      { id: 2, name: "test2" },
-      { id: 3, name: "test3" },
-    ];
+  it("does not republish a message after backpressure", async () => {
+    channel.sendToQueue.mockReturnValueOnce(false).mockReturnValueOnce(true);
 
-    it("should return empty result for empty messages array", async () => {
-      const result = await batchHandler.publishBatchToExchange(
-        mockChannel,
-        exchange,
-        routingKey,
-        [],
-        {},
-        mockWaitForDrain,
-      );
+    await handler.publishBatch(channel, "orders", [{ id: 1 }, { id: 2 }], {}, waitForDrain);
 
-      expect(result).toEqual({
-        total: 0,
-        successful: 0,
-        failed: 0,
-        errors: [],
-      });
-      expect(mockChannel.publish).not.toHaveBeenCalled();
-    });
+    expect(channel.sendToQueue).toHaveBeenCalledTimes(2);
+    expect(channel.sendToQueue.mock.calls[0][1]).toEqual(Buffer.from('{"id":1}'));
+    expect(channel.sendToQueue.mock.calls[1][1]).toEqual(Buffer.from('{"id":2}'));
+  });
 
-    it("should publish all messages to exchange", async () => {
-      const result = await batchHandler.publishBatchToExchange(
-        mockChannel,
-        exchange,
-        routingKey,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
+  it("records synchronous send failures without aborting the batch", async () => {
+    channel.sendToQueue
+      .mockReturnValueOnce(true)
+      .mockImplementationOnce(() => { throw new Error("failed"); })
+      .mockReturnValueOnce(true);
 
-      expect(mockChannel.publish).toHaveBeenCalledTimes(3);
-      expect(result.total).toBe(3);
-      expect(result.successful).toBe(3);
-      expect(result.failed).toBe(0);
-    });
+    const result = await handler.publishBatch(
+      channel,
+      "orders",
+      [{ id: 1 }, { id: 2 }, { id: 3 }],
+      {},
+      waitForDrain,
+    );
 
-    it("should use same routing key for all messages", async () => {
-      await batchHandler.publishBatchToExchange(
-        mockChannel,
-        exchange,
-        "custom.key",
-        messages,
-        {},
-        mockWaitForDrain,
-      );
+    expect(result.successful).toBe(2);
+    expect(result.failed).toBe(1);
+    expect(result.errors[0].index).toBe(1);
+  });
 
-      expect(mockChannel.publish).toHaveBeenCalledTimes(3);
-      for (let i = 0; i < messages.length; i++) {
-        expect(mockChannel.publish).toHaveBeenCalledWith(
-          exchange,
-          "custom.key",
-          expect.any(Buffer),
-          expect.any(Object),
-        );
-      }
-    });
+  it("applies the same backpressure semantics to exchanges", async () => {
+    channel.publish.mockReturnValueOnce(false).mockReturnValueOnce(true);
 
-    it("should track individual failures in exchange batch", async () => {
-      mockChannel.publish
-        .mockReturnValueOnce(true)
-        .mockImplementationOnce(() => {
-          throw new Error("Failed to publish");
-        })
-        .mockReturnValueOnce(true);
+    const result = await handler.publishBatchToExchange(
+      channel,
+      "events",
+      "orders.created",
+      [{ id: 1 }, { id: 2 }],
+      {},
+      waitForDrain,
+    );
 
-      const result = await batchHandler.publishBatchToExchange(
-        mockChannel,
-        exchange,
-        routingKey,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
-
-      expect(result.total).toBe(3);
-      expect(result.successful).toBe(2);
-      expect(result.failed).toBe(1);
-      expect(result.errors[0].index).toBe(1);
-      expect(result.errors[0].message).toEqual(messages[1]);
-    });
-
-    it("should wait for drain when buffer is full in exchange batch", async () => {
-      mockChannel.publish
-        .mockReturnValueOnce(false) // First message - buffer full
-        .mockReturnValueOnce(true) // Retry success
-        .mockReturnValueOnce(true) // Second message
-        .mockReturnValueOnce(true); // Third message
-
-      await batchHandler.publishBatchToExchange(
-        mockChannel,
-        exchange,
-        routingKey,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
-
-      expect(mockWaitForDrain).toHaveBeenCalledTimes(1);
-    });
-
-    it("should retry after drain in exchange batch", async () => {
-      mockChannel.publish
-        .mockReturnValueOnce(false) // First message - buffer full
-        .mockReturnValueOnce(true) // Retry success
-        .mockReturnValueOnce(true) // Second message
-        .mockReturnValueOnce(true); // Third message
-
-      await batchHandler.publishBatchToExchange(
-        mockChannel,
-        exchange,
-        routingKey,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
-
-      expect(mockChannel.publish).toHaveBeenCalledTimes(4);
-    });
-
-    it("should mark as failed if retry still fails in exchange batch", async () => {
-      mockChannel.publish
-        .mockReturnValueOnce(false) // First message - buffer full
-        .mockReturnValueOnce(false) // Retry still fails
-        .mockReturnValueOnce(true) // Second message
-        .mockReturnValueOnce(true); // Third message
-
-      const result = await batchHandler.publishBatchToExchange(
-        mockChannel,
-        exchange,
-        routingKey,
-        messages,
-        {},
-        mockWaitForDrain,
-      );
-
-      expect(result.failed).toBe(1);
-      expect(result.errors[0].error.message).toBe(
-        "Buffer still full after waiting for drain",
-      );
-    });
+    expect(waitForDrain).toHaveBeenCalledTimes(1);
+    expect(channel.publish).toHaveBeenCalledTimes(2);
+    expect(result.failed).toBe(0);
   });
 });

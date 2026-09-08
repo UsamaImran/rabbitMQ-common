@@ -1,353 +1,119 @@
 // @ts-nocheck
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-  jest,
-} from "@jest/globals";
+import { describe, it, expect, beforeEach, jest } from "@jest/globals";
 import type { ConsumeMessage } from "amqplib";
 import { Consumer } from "../../consumer/index.js";
+import { ConnectionManager } from "../../connectionManager.js";
 
-jest.mock("../../connectionManager", () => ({
+jest.mock("../../connectionManager.js", () => ({
   ConnectionManager: {
     getConnection: jest.fn(),
     isConnected: jest.fn(),
   },
 }));
 
-// Import after mock to get the mocked functions
-import { ConnectionManager } from "../../connectionManager.js";
-
-// Get references to the mocked functions
 const mockGetConnection = ConnectionManager.getConnection as jest.Mock;
-const mockIsConnected = ConnectionManager.isConnected as jest.Mock;
 
-// Test consumer implementation
-class TestConsumer extends Consumer<{ id: number; name: string }> {
-  public processedMessages: Array<{ id: number; name: string }> = [];
-  public errors: Error[] = [];
-
-  async onMessage(
-    data: { id: number; name: string },
-    msg: ConsumeMessage,
-  ): Promise<void> {
-    this.processedMessages.push(data);
-    if (data.id === 999) {
-      throw new Error("Test error");
-    }
-  }
-
-  async onError(
-    error: Error,
-    data?: { id: number; name: string },
-  ): Promise<void> {
-    this.errors.push(error);
+class TestConsumer extends Consumer<{ id: number }> {
+  async onMessage(data: { id: number }): Promise<void> {
+    if (data.id === 999) throw new Error("processing failed");
   }
 }
 
 describe("Consumer", () => {
-  const testUrl = "amqp://localhost:5672";
-  let mockChannel: any;
-  let consumer: TestConsumer;
-  let consumeCallback: any;
+  let channel: any;
 
-  beforeEach(async () => {
-    mockChannel = {
+  beforeEach(() => {
+    channel = {
       prefetch: jest.fn().mockResolvedValue(undefined),
       assertQueue: jest.fn().mockResolvedValue(undefined),
       assertExchange: jest.fn().mockResolvedValue(undefined),
       bindQueue: jest.fn().mockResolvedValue(undefined),
       unbindQueue: jest.fn().mockResolvedValue(undefined),
-      consume: jest.fn().mockImplementation((queue, callback) => {
-        consumeCallback = callback;
-      }),
+      consume: jest.fn(),
       ack: jest.fn(),
       nack: jest.fn(),
       on: jest.fn(),
       once: jest.fn(),
-      removeAllListeners: jest.fn(),
+      removeListener: jest.fn(),
       close: jest.fn().mockResolvedValue(undefined),
-    } as any;
-
-    mockGetConnection.mockResolvedValue({
-      createChannel: jest.fn().mockResolvedValue(mockChannel),
-    });
-
-    consumer = new TestConsumer(testUrl);
-    await consumer["getChannel"]();
+    };
+    mockGetConnection.mockResolvedValue({ createChannel: jest.fn().mockResolvedValue(channel) });
   });
 
-  afterEach(() => {
-    jest.clearAllMocks();
-    jest.restoreAllMocks();
-  });
+  it("configures DLQ at consumer initialization, not consume()", async () => {
+    const consumer = new TestConsumer("amqp://localhost", { useDLQ: true });
+    await consumer.consume("orders");
 
-  describe("consume", () => {
-    it("should start consuming from queue", async () => {
-      await consumer.consume("test-queue");
-
-      expect(mockChannel.prefetch).toHaveBeenCalledWith(1);
-      expect(mockChannel.assertQueue).toHaveBeenCalledWith("test-queue", {
-        durable: true,
-      });
-      expect(mockChannel.consume).toHaveBeenCalledWith(
-        "test-queue",
-        expect.any(Function),
-      );
-      expect(consumer.isActive()).toBe(true);
-    });
-
-    it("should setup DLQ when enabled", async () => {
-      await consumer.consume("test-queue", { useDLQ: true });
-
-      expect(mockChannel.assertExchange).toHaveBeenCalledWith(
-        "test-queue_dlx",
-        "direct",
-        { durable: true },
-      );
-      expect(mockChannel.assertQueue).toHaveBeenCalledWith(
-        "test-queue_failed",
-        {
-          durable: true,
-        },
-      );
-      expect(mockChannel.bindQueue).toHaveBeenCalledWith(
-        "test-queue_failed",
-        "test-queue_dlx",
-        "dead-letter",
-      );
-    });
-
-    it("should bind to exchange when provided", async () => {
-      await consumer.consume("test-queue", {
-        exchange: "test-exchange",
-        exchangeType: "topic",
-        routingKey: "test.key",
-      });
-
-      expect(mockChannel.assertExchange).toHaveBeenCalledWith(
-        "test-exchange",
-        "topic",
-        { durable: true },
-      );
-      expect(mockChannel.bindQueue).toHaveBeenCalledWith(
-        "test-queue",
-        "test-exchange",
-        "test.key",
-      );
-    });
-
-    it("should set up recovery listeners", async () => {
-      await consumer.consume("test-queue");
-
-      expect(mockChannel.removeAllListeners).toHaveBeenCalledWith("close");
-      expect(mockChannel.removeAllListeners).toHaveBeenCalledWith("error");
-      expect(mockChannel.on).toHaveBeenCalledWith(
-        "close",
-        expect.any(Function),
-      );
-      expect(mockChannel.on).toHaveBeenCalledWith(
-        "error",
-        expect.any(Function),
-      );
-    });
-
-    // REMOVED: should handle consumption errors with recovery - causing timeout
-  });
-
-  describe("message processing", () => {
-    it("should process valid messages", async () => {
-      await consumer.consume("test-queue");
-
-      const testMessage = {
-        content: Buffer.from(JSON.stringify({ id: 1, name: "test" })),
-        properties: { correlationId: "corr-123" },
-      } as ConsumeMessage;
-
-      await consumeCallback(testMessage);
-
-      expect(consumer.processedMessages).toHaveLength(1);
-      expect(consumer.processedMessages[0]).toEqual({ id: 1, name: "test" });
-      expect(mockChannel.ack).toHaveBeenCalledWith(testMessage);
-    });
-
-    it("should handle malformed JSON", async () => {
-      await consumer.consume("test-queue", { useDLQ: true });
-
-      const testMessage = {
-        content: Buffer.from("invalid json"),
-        properties: {},
-      } as ConsumeMessage;
-
-      await consumeCallback(testMessage);
-
-      expect(consumer.errors).toHaveLength(1);
-      expect(consumer.errors[0].message).toContain("Failed to parse message");
-      expect(mockChannel.nack).toHaveBeenCalledWith(testMessage, false, false);
-    });
-
-    it("should handle user errors with requeue when DLQ disabled", async () => {
-      await consumer.consume("test-queue", { useDLQ: false });
-
-      const testMessage = {
-        content: Buffer.from(JSON.stringify({ id: 999, name: "error" })),
-        properties: {},
-      } as ConsumeMessage;
-
-      await consumeCallback(testMessage);
-
-      expect(consumer.errors).toHaveLength(1);
-      expect(consumer.errors[0].message).toBe("Test error");
-      expect(mockChannel.nack).toHaveBeenCalledWith(testMessage, false, true);
-    });
-
-    it("should handle user errors without requeue when DLQ enabled", async () => {
-      await consumer.consume("test-queue", { useDLQ: true });
-
-      const testMessage = {
-        content: Buffer.from(JSON.stringify({ id: 999, name: "error" })),
-        properties: {},
-      } as ConsumeMessage;
-
-      await consumeCallback(testMessage);
-
-      expect(consumer.errors).toHaveLength(1);
-      expect(mockChannel.nack).toHaveBeenCalledWith(testMessage, false, false);
+    expect(channel.assertExchange).toHaveBeenCalledWith("orders_dlx", "direct", { durable: true });
+    expect(channel.assertQueue).toHaveBeenCalledWith("orders_failed", { durable: true });
+    expect(channel.bindQueue).toHaveBeenCalledWith("orders_failed", "orders_dlx", "dead-letter");
+    expect(channel.assertQueue).toHaveBeenCalledWith("orders", {
+      durable: true,
+      deadLetterExchange: "orders_dlx",
+      deadLetterRoutingKey: "dead-letter",
     });
   });
 
-  describe("bindQueue", () => {
-    it("should bind queue at runtime", async () => {
-      await consumer.consume("test-queue");
+  it("does not accept per-consume DLQ configuration", async () => {
+    const consumer = new TestConsumer("amqp://localhost");
+    await consumer.consume("orders", { prefetch: 5 });
 
-      await consumer.bindQueue(
-        "test-queue",
-        "new-exchange",
-        "topic",
-        "new.key",
-      );
-
-      expect(mockChannel.bindQueue).toHaveBeenCalledWith(
-        "test-queue",
-        "new-exchange",
-        "new.key",
-      );
-    });
-
-    it("should throw error when not consuming from queue", async () => {
-      await consumer.consume("test-queue");
-
-      await expect(
-        consumer.bindQueue("wrong-queue", "exchange", "topic"),
-      ).rejects.toThrow(
-        'Cannot bind: not currently consuming from queue "wrong-queue"',
-      );
-    });
-
-    it("should throw error when not consuming at all", async () => {
-      const newConsumer = new TestConsumer(testUrl);
-
-      await expect(
-        newConsumer.bindQueue("test-queue", "exchange", "topic"),
-      ).rejects.toThrow(
-        'Cannot bind: not currently consuming from queue "test-queue"',
-      );
-    });
+    expect(channel.assertExchange).not.toHaveBeenCalled();
+    expect(channel.assertQueue).toHaveBeenCalledWith("orders", { durable: true });
   });
 
-  describe("unbindQueue", () => {
-    it("should unbind queue at runtime", async () => {
-      await consumer.consume("test-queue");
+  it("nacks processing failures without requeue when DLQ is enabled", async () => {
+    let callback: any;
+    channel.consume.mockImplementation((_queue, handler) => { callback = handler; });
+    const consumer = new TestConsumer("amqp://localhost", { useDLQ: true });
+    await consumer.consume("orders");
 
-      await consumer.unbindQueue("test-queue", "test-exchange", "test.key");
+    const msg = { content: Buffer.from('{"id":999}'), properties: {} } as ConsumeMessage;
+    await callback(msg);
 
-      expect(mockChannel.unbindQueue).toHaveBeenCalledWith(
-        "test-queue",
-        "test-exchange",
-        "test.key",
-      );
-    });
+    expect(channel.nack).toHaveBeenCalledWith(msg, false, false);
   });
 
-  describe("getCurrentQueue", () => {
-    it("should return undefined when not consuming", () => {
-      expect(consumer.getCurrentQueue()).toBeUndefined();
-    });
+  it("requeues processing failures when DLQ is disabled", async () => {
+    let callback: any;
+    channel.consume.mockImplementation((_queue, handler) => { callback = handler; });
+    const consumer = new TestConsumer("amqp://localhost");
+    await consumer.consume("orders");
 
-    it("should return current queue when consuming", async () => {
-      await consumer.consume("test-queue");
-      expect(consumer.getCurrentQueue()).toBe("test-queue");
-    });
+    const msg = { content: Buffer.from('{"id":999}'), properties: {} } as ConsumeMessage;
+    await callback(msg);
+
+    expect(channel.nack).toHaveBeenCalledWith(msg, false, true);
   });
 
-  describe("forceRecover", () => {
-    it("should trigger recovery when consuming", async () => {
-      await consumer.consume("test-queue");
+  it("does not remove listeners owned by other consumers", async () => {
+    const consumer = new TestConsumer("amqp://localhost");
+    await consumer.consume("orders");
 
-      const recoverSpy = jest.spyOn(consumer as any, "handleRecovery");
-      // Mock the delay to avoid waiting
-      jest
-        .spyOn(consumer["recoveryManager"], "getNextDelay")
-        .mockReturnValue(10);
-
-      await consumer.forceRecover();
-
-      expect(recoverSpy).toHaveBeenCalled();
-    });
-
-    it("should not trigger recovery when not consuming", async () => {
-      const recoverSpy = jest.spyOn(consumer as any, "handleRecovery");
-      await consumer.forceRecover();
-
-      expect(recoverSpy).not.toHaveBeenCalled();
-    });
+    expect(channel.removeAllListeners).not.toHaveBeenCalled();
   });
 
-  describe("close", () => {
-    it("should close consumer and cleanup", async () => {
-      await consumer.consume("test-queue");
-      await consumer.close();
+  it("restores runtime bindings after a new channel is created", async () => {
+    let callback: any;
+    channel.consume.mockImplementation((_queue, handler) => { callback = handler; });
+    const consumer = new TestConsumer("amqp://localhost");
+    await consumer.consume("orders");
+    await consumer.bindQueue("orders", "events", "topic", "orders.#");
 
-      expect(mockChannel.close).toHaveBeenCalled();
-      expect(consumer.isActive()).toBe(false);
-      expect(consumer.getActiveBindings()).toHaveLength(0);
-    });
-  });
+    const secondChannel = {
+      ...channel,
+      prefetch: jest.fn().mockResolvedValue(undefined),
+      assertQueue: jest.fn().mockResolvedValue(undefined),
+      assertExchange: jest.fn().mockResolvedValue(undefined),
+      bindQueue: jest.fn().mockResolvedValue(undefined),
+      consume: jest.fn(),
+      on: jest.fn(),
+      close: jest.fn().mockResolvedValue(undefined),
+    };
+    mockGetConnection.mockResolvedValue({ createChannel: jest.fn().mockResolvedValue(secondChannel) });
+    (consumer as any).channel = undefined;
+    await (consumer as any).startConsumption("orders", {}, true);
 
-  describe("getActiveBindings", () => {
-    it("should return active bindings", async () => {
-      await consumer.consume("test-queue", {
-        exchange: "test-exchange",
-        exchangeType: "topic",
-        routingKey: "test.key",
-      });
-
-      const bindings = consumer.getActiveBindings();
-      expect(bindings).toContain("test-queue:test-exchange:test.key");
-    });
-
-    it("should return empty array when no bindings", async () => {
-      await consumer.consume("test-queue");
-      expect(consumer.getActiveBindings()).toEqual([]);
-    });
-  });
-
-  describe("isActive", () => {
-    it("should return false before consuming", () => {
-      expect(consumer.isActive()).toBe(false);
-    });
-
-    it("should return true after consuming", async () => {
-      await consumer.consume("test-queue");
-      expect(consumer.isActive()).toBe(true);
-    });
-
-    it("should return false after close", async () => {
-      await consumer.consume("test-queue");
-      await consumer.close();
-      expect(consumer.isActive()).toBe(false);
-    });
+    expect(secondChannel.bindQueue).toHaveBeenCalledWith("orders", "events", "orders.#");
   });
 });

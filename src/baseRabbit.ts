@@ -1,16 +1,16 @@
 import { ConnectionManager } from "./connectionManager.js";
-import type { Logger } from "./types.js";
 import type { Channel } from "amqplib";
+import type { BaseRabbitOptions, Logger } from "./types.js";
 
-export interface BaseRabbitOptions {
-  maxRetries?: number;
-  logger?: Logger;
-}
+export type { BaseRabbitOptions } from "./types.js";
 
 export abstract class BaseRabbit {
   protected channel?: Channel;
-  protected maxRetries: number;
-  protected logger: Logger;
+  private channelPromise?: Promise<Channel>;
+  protected readonly maxRetries: number;
+  protected readonly logger: Logger;
+  protected readonly useDLQ: boolean;
+  protected readonly queueOptions: BaseRabbitOptions["queueOptions"];
 
   constructor(
     protected readonly url: string,
@@ -18,36 +18,60 @@ export abstract class BaseRabbit {
   ) {
     this.maxRetries = options.maxRetries ?? 5;
     this.logger = options.logger ?? console;
+    this.useDLQ = options.useDLQ ?? false;
+    this.queueOptions = options.queueOptions;
   }
 
   protected async getChannel(): Promise<Channel> {
     if (this.channel) return this.channel;
+    if (this.channelPromise) return this.channelPromise;
 
-    const connection = await ConnectionManager.getConnection(
-      this.url,
-      this.maxRetries,
-    );
-    this.channel = await connection.createChannel();
+    this.channelPromise = (async () => {
+      const connection = await ConnectionManager.getConnection(
+        this.url,
+        this.maxRetries,
+      );
+      const channel = await connection.createChannel();
 
-    this.channel.on("error", () => {
-      this.channel = undefined;
-    });
+      const invalidate = () => {
+        if (this.channel === channel) {
+          this.channel = undefined;
+        }
+        this.onChannelInvalidated(channel);
+      };
 
-    this.channel.on("close", () => {
-      this.channel = undefined;
-    });
+      channel.on("error", invalidate);
+      channel.on("close", invalidate);
 
-    return this.channel;
+      this.channel = channel;
+      return channel;
+    })();
+
+    try {
+      return await this.channelPromise;
+    } finally {
+      this.channelPromise = undefined;
+    }
+  }
+
+  /**
+   * Hook for subclasses that keep channel-scoped caches.
+   */
+  protected onChannelInvalidated(_channel: Channel): void {
+    // Intentionally empty.
   }
 
   async close(): Promise<void> {
-    if (this.channel) {
+    const channel = this.channel;
+    this.channel = undefined;
+
+    if (channel) {
       try {
-        await this.channel.close();
+        await channel.close();
       } catch {
-        // ignore — channel may already be closed
+        // Ignore — channel may already be closed.
       }
-      this.channel = undefined;
+      this.onChannelInvalidated(channel);
     }
   }
 
@@ -56,7 +80,7 @@ export abstract class BaseRabbit {
   }
 
   isChannelReady(): boolean {
-    return !!(this.channel && typeof this.channel.close === "function");
+    return this.channel !== undefined;
   }
 
   getUrl(): string {

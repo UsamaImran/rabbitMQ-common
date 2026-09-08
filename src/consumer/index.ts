@@ -1,254 +1,153 @@
-import type { ConsumeMessage } from "amqplib";
+import type { Channel, ConsumeMessage } from "amqplib";
 import { BaseRabbit, BaseRabbitOptions } from "../baseRabbit.js";
-import {
-  ConsumeOptions,
-  ExchangeConsumeOptions,
-  ExchangeType,
-} from "../types.js";
+import { RabbitConsumeError } from "../types.js";
+import type { ExchangeConsumeOptions, ExchangeType } from "../types.js";
 import { BindingManager } from "./bindingManager.js";
 import { MessageHandler } from "./messageHandler.js";
 import { QueueSetup } from "./queueSetup.js";
 import { RecoveryManager } from "./recoveryManager.js";
 
+export interface ConsumerOptions extends BaseRabbitOptions {
+  maxRecoverRetries?: number;
+  backoffBase?: number;
+  maxBackoff?: number;
+  recoveryJitter?: number;
+}
+
 export abstract class Consumer<T> extends BaseRabbit {
-  private queueSetup: QueueSetup;
-  private bindingManager: BindingManager;
-  private recoveryManager: RecoveryManager;
+  private readonly queueSetup = new QueueSetup();
+  private readonly bindingManager = new BindingManager();
+  private readonly recoveryManager: RecoveryManager;
   private currentQueue?: string;
   private currentOptions?: ExchangeConsumeOptions;
+  private recoveryPromise?: Promise<void>;
+  private closed = false;
+  private generation = 0;
   private isConsuming = false;
 
-  constructor(
-    url: string,
-    options: BaseRabbitOptions & { maxRecoverRetries?: number } = {},
-  ) {
+  constructor(url: string, options: ConsumerOptions = {}) {
     super(url, options);
-    this.queueSetup = new QueueSetup();
-    this.bindingManager = new BindingManager();
-    this.recoveryManager = new RecoveryManager(
-      { maxRecoverRetries: options.maxRecoverRetries ?? -1 },
-      this.logger,
-    );
+    this.recoveryManager = new RecoveryManager({ maxRecoverRetries: options.maxRecoverRetries ?? -1, backoffBase: options.backoffBase, maxBackoff: options.maxBackoff, jitter: options.recoveryJitter }, this.logger);
   }
 
-  // User must implement these
   abstract onMessage(data: T, originalMsg: ConsumeMessage): Promise<void>;
 
-  async onError(
-    error: Error,
-    data?: T,
-    originalMsg?: ConsumeMessage,
-  ): Promise<void> {
+  async onError(error: Error, _data?: T, originalMsg?: ConsumeMessage): Promise<void> {
     this.logger.error(`[RabbitMQ Consumer Error]: ${error.message}`);
-
-    if (data !== undefined) {
-      this.logger.info(
-        `[RabbitMQ] Failed message data: ${JSON.stringify(data)}`,
-      );
-    }
-    if (originalMsg?.properties?.correlationId) {
-      this.logger.info(
-        `[RabbitMQ] Correlation ID: ${originalMsg.properties.correlationId}`,
-      );
-    }
+    if (originalMsg?.properties?.correlationId) this.logger.info(`[RabbitMQ] Correlation ID: ${originalMsg.properties.correlationId}`);
   }
 
-  /**
-   * Start consuming from a queue
-   */
-  async consume(
-    queue: string,
-    options: ExchangeConsumeOptions = {},
-  ): Promise<void> {
-    // Store for recovery
+  protected override onChannelInvalidated(channel: Channel): void {
+    this.queueSetup.invalidateChannel(channel);
+    this.bindingManager.resetExchangeCache();
+  }
+
+  async consume(queue: string, options: ExchangeConsumeOptions = {}): Promise<void> {
+    this.closed = false;
     this.currentQueue = queue;
-    this.currentOptions = options;
-
+    this.currentOptions = { ...options };
+    this.isConsuming = false;
+    this.bindingManager.clear();
     try {
-      const channel = await this.getChannel();
-      const prefetch = options.prefetch ?? 1;
-      const useDLQ = options.useDLQ ?? false;
-
-      // Set prefetch
-      await channel.prefetch(prefetch);
-
-      // Step 1: Setup queue (with DLQ if needed)
-      await this.queueSetup.setupQueue(channel, queue, { useDLQ });
-
-      // Step 2: Bind to exchange if provided
-      if (options.exchange && options.exchangeType) {
-        await this.bindingManager.bind(
-          channel,
-          queue,
-          options.exchange,
-          options.exchangeType,
-          options.routingKey ?? "",
-        );
-      }
-
-      // Step 3: Create message handler
-      const messageHandler = new MessageHandler<T>(
-        channel,
-        {
-          onMessage: this.onMessage.bind(this),
-          onError: this.onError.bind(this),
-          logger: this.logger,
-        },
-        useDLQ,
-      );
-
-      // Step 4: Start consuming
-      await channel.consume(queue, messageHandler.createHandler());
-
-      // Step 5: Set up recovery listeners
-      channel.removeAllListeners("close");
-      channel.removeAllListeners("error");
-      channel.on("close", () => this.handleRecovery());
-      channel.on("error", () => this.handleRecovery());
-
-      // Reset recovery state on successful consume
-      this.recoveryManager.reset();
-      this.isConsuming = true;
-
-      this.logger.info(`[RabbitMQ] Started consuming from queue: ${queue}`);
+      await this.startConsumption(queue, options, false);
     } catch (err: unknown) {
-      this.logger.error(
-        `[RabbitMQ] Initial consumption failed for "${queue}", attempting recovery...`,
-      );
-      await this.handleRecovery();
+      this.isConsuming = false;
+      const error = err instanceof Error ? err : new Error(String(err));
+      throw new RabbitConsumeError(`Failed to start consuming from queue "${queue}": ${error.message}`, queue, err);
     }
   }
 
-  /**
-   * Bind queue to an exchange at runtime
-   */
-  async bindQueue(
-    queue: string,
-    exchange: string,
-    exchangeType: ExchangeType,
-    routingKey?: string,
-  ): Promise<void> {
-    if (!this.currentQueue || this.currentQueue !== queue) {
-      throw new Error(
-        `Cannot bind: not currently consuming from queue "${queue}"`,
-      );
+  private async startConsumption(queue: string, options: ExchangeConsumeOptions, recovering: boolean): Promise<void> {
+    const channel = await this.getChannel();
+    await channel.prefetch(options.prefetch ?? 1);
+    await this.queueSetup.setupQueue(channel, queue, { useDLQ: this.useDLQ, queueOptions: this.queueOptions });
+
+    if (recovering) {
+      await this.bindingManager.restore(channel);
+    } else if (options.exchange && options.exchangeType) {
+      await this.bindingManager.bind(channel, queue, options.exchange, options.exchangeType, options.routingKey ?? "");
     }
 
+    const messageHandler = new MessageHandler<T>(channel, { onMessage: this.onMessage.bind(this), onError: this.onError.bind(this), logger: this.logger }, this.useDLQ);
+    await channel.consume(queue, messageHandler.createHandler());
+
+    const generation = ++this.generation;
+    channel.on("close", () => { if (!this.closed && generation === this.generation) void this.handleRecovery(); });
+    channel.on("error", () => { if (!this.closed && generation === this.generation) void this.handleRecovery(); });
+
+    this.recoveryManager.reset();
+    this.isConsuming = true;
+    this.logger.info(`[RabbitMQ] Started consuming from queue: ${queue}`);
+  }
+
+  async bindQueue(queue: string, exchange: string, exchangeType: ExchangeType, routingKey = ""): Promise<void> {
+    if (!this.currentQueue || this.currentQueue !== queue || !this.isConsuming) throw new Error(`Cannot bind: not currently consuming from queue "${queue}"`);
     const channel = await this.getChannel();
-    await this.bindingManager.bind(
-      channel,
-      queue,
-      exchange,
-      exchangeType,
-      routingKey ?? "",
-    );
-
-    this.logger.info(
-      `[RabbitMQ] Bound queue "${queue}" to exchange "${exchange}" with routing key "${routingKey ?? ""}"`,
-    );
+    await this.bindingManager.bind(channel, queue, exchange, exchangeType, routingKey);
   }
 
-  /**
-   * Unbind queue from an exchange
-   */
-  async unbindQueue(
-    queue: string,
-    exchange: string,
-    routingKey?: string,
-  ): Promise<void> {
+  async unbindQueue(queue: string, exchange: string, routingKey = ""): Promise<void> {
+    if (!this.currentQueue || this.currentQueue !== queue || !this.isConsuming) throw new Error(`Cannot unbind: not currently consuming from queue "${queue}"`);
     const channel = await this.getChannel();
-    await this.bindingManager.unbind(
-      channel,
-      queue,
-      exchange,
-      routingKey ?? "",
-    );
-
-    this.logger.info(
-      `[RabbitMQ] Unbound queue "${queue}" from exchange "${exchange}" with routing key "${routingKey ?? ""}"`,
-    );
+    await this.bindingManager.unbind(channel, queue, exchange, routingKey);
   }
 
-  /**
-   * Get currently consumed queue name
-   */
-  getCurrentQueue(): string | undefined {
-    return this.currentQueue;
-  }
+  getCurrentQueue(): string | undefined { return this.currentQueue; }
 
-  /**
-   * Force recovery manually
-   */
   async forceRecover(): Promise<void> {
-    if (!this.currentQueue || !this.currentOptions) {
+    if (!this.currentQueue || !this.currentOptions || !this.isConsuming) {
       this.logger.warn("[RabbitMQ] Cannot recover: no active consumption");
       return;
     }
     await this.handleRecovery();
   }
 
-  /**
-   * Handle recovery logic
-   */
   private async handleRecovery(): Promise<void> {
-    if (!this.recoveryManager.canRecover()) {
-      return;
-    }
-
-    if (!this.currentQueue || !this.currentOptions) {
-      this.logger.error(
-        "[RabbitMQ] Cannot recover: no queue or options stored",
-      );
-      return;
-    }
-
-    this.recoveryManager.startRecovery();
-
-    const delay = this.recoveryManager.getNextDelay();
-    this.logger.warn(
-      `[RabbitMQ] Consumer for "${this.currentQueue}" lost connection. Recovering in ${delay}ms... (attempt ${this.recoveryManager.getRetryCount()})`,
-    );
-
-    // Wait for backoff
-    await new Promise((resolve) => setTimeout(resolve, delay));
-
-    // Clean up old channel
-    if (this.channel) {
-      try {
-        await this.channel.close();
-      } catch {
-        // ignore
-      }
-      this.channel = undefined;
-    }
-
-    // Reset recovery flag before re-consuming
-    this.recoveryManager.completeRecovery();
-
-    // Re-consume
-    await this.consume(this.currentQueue, this.currentOptions);
+    if (this.closed || !this.currentQueue || !this.currentOptions) return;
+    if (this.recoveryPromise) return this.recoveryPromise;
+    this.recoveryPromise = this.recoverLoop(this.currentQueue, this.currentOptions).finally(() => { this.recoveryPromise = undefined; });
+    return this.recoveryPromise;
   }
 
-  /**
-   * Close consumer and clean up
-   */
+  private async recoverLoop(queue: string, options: ExchangeConsumeOptions): Promise<void> {
+    while (!this.closed && this.recoveryManager.canRecover()) {
+      this.recoveryManager.startRecovery();
+      const delay = this.recoveryManager.getNextDelay();
+      this.logger.warn(`[RabbitMQ] Consumer for "${queue}" lost connection. Recovering in ${delay}ms... (attempt ${this.recoveryManager.getRetryCount()})`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      if (this.closed) return;
+
+      try {
+        await super.close();
+        await this.startConsumption(queue, options, true);
+        return;
+      } catch (err: unknown) {
+        this.isConsuming = false;
+        if (this.isPermanentTopologyError(err)) {
+          this.logger.error(`[RabbitMQ] Recovery stopped because the broker rejected the topology: ${err instanceof Error ? err.message : String(err)}`);
+          return;
+        }
+        this.logger.error(`[RabbitMQ] Recovery attempt failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (!this.closed) this.logger.error(`[RabbitMQ] Recovery exhausted for queue "${queue}"`);
+  }
+
+  private isPermanentTopologyError(error: unknown): boolean {
+    const candidate = error as { code?: number; message?: string } | undefined;
+    return candidate?.code === 403 || candidate?.code === 404 || candidate?.code === 405 || candidate?.code === 406 || candidate?.message?.includes("PRECONDITION_FAILED") === true || candidate?.message?.includes("ACCESS_REFUSED") === true;
+  }
+
   async close(): Promise<void> {
+    this.closed = true;
     this.isConsuming = false;
+    this.generation++;
     this.bindingManager.clear();
+    this.currentQueue = undefined;
+    this.currentOptions = undefined;
     await super.close();
   }
 
-  /**
-   * Check if currently consuming
-   */
-  isActive(): boolean {
-    return this.isConsuming;
-  }
-
-  /**
-   * Get active bindings
-   */
-  getActiveBindings(): string[] {
-    return this.bindingManager.getActiveBindings();
-  }
+  isActive(): boolean { return this.isConsuming; }
+  getActiveBindings(): string[] { return this.bindingManager.getActiveBindings(); }
 }

@@ -1,36 +1,15 @@
 {
   "name": "rabbitmq-common",
-  "version": "5.2.0",
+  "version": "6.0.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": [
-    "dist",
-    "docs",
-    "README.md"
-  ],
-  "keywords": [
-    "rabbitmq",
-    "amqp",
-    "nodejs",
-    "typescript",
-    "microservices",
-    "message-queue",
-    "event-driven",
-    "pubsub",
-    "queue",
-    "producer",
-    "consumer"
-  ],
-  "repository": {
-    "url": "https://github.com/UsamaImran/rabbitMQ-common",
-    "type": "git"
-  },
-  "description": "A TypeScript-first RabbitMQ utility for Node.js with cleaner producers, consumers, and reduced AMQP boilerplate.",
+  "files": ["dist", "docs", "README.md"],
+  "keywords": ["rabbitmq", "amqp", "nodejs", "typescript", "microservices", "message-queue", "event-driven", "pubsub", "queue", "producer", "consumer"],
+  "repository": { "url": "https://github.com/UsamaImran/rabbitMQ-common", "type": "git" },
+  "description": "A TypeScript-first RabbitMQ utility for Node.js with reliable producer/consumer lifecycle management and topology-aware DLQ support.",
   "homepage": "https://github.com/UsamaImran/rabbitMQ-common#readme",
-  "bugs": {
-    "url": "https://github.com/UsamaImran/rabbitMQ-common/issues"
-  },
+  "bugs": { "url": "https://github.com/UsamaImran/rabbitMQ-common/issues" },
   "license": "MIT",
   "scripts": {
     "build": "tsc",
@@ -39,9 +18,7 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"
   },
-  "dependencies": {
-    "amqplib": "^1.1.0"
-  },
+  "dependencies": { "amqplib": "^1.1.0" },
   "devDependencies": {
     "@types/amqplib": "^0.10.8",
     "@types/jest": "^29.5.12",
