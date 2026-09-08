@@ -185,6 +185,12 @@ export abstract class Consumer<T> extends BaseRabbit {
         return;
       } catch (err: unknown) {
         this.isConsuming = false;
+        if (this.isPermanentTopologyError(err)) {
+          this.logger.error(
+            `[RabbitMQ] Recovery stopped because the broker rejected the topology: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return;
+        }
         this.logger.error(
           `[RabbitMQ] Recovery attempt failed: ${err instanceof Error ? err.message : String(err)}`,
         );
@@ -194,6 +200,11 @@ export abstract class Consumer<T> extends BaseRabbit {
     if (!this.closed) {
       this.logger.error(`[RabbitMQ] Recovery exhausted for queue "${queue}"`);
     }
+  }
+
+  private isPermanentTopologyError(error: unknown): boolean {
+    const candidate = error as { code?: number; message?: string } | undefined;
+    return candidate?.code === 403 || candidate?.code === 404 || candidate?.code === 405 || candidate?.code === 406 || candidate?.message?.includes("PRECONDITION_FAILED") === true || candidate?.message?.includes("ACCESS_REFUSED") === true;
   }
 
   async close(): Promise<void> {
